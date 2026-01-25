@@ -1,0 +1,23 @@
+tenants:
+  - issuer_url: "https://hospital-a.keycloak.local/realms/main"
+    tenant_id: "hospital-a"
+    jwks_endpoint: "https://hospital-a.keycloak.local/realms/main/protocol/openid-connect/certs"
+    audience: "fhir-privacy-proxy"
+    policy_bundle: "hospital-a"
+    token_ttl: "15m"
+    allowed_scopes:
+      - "patient/Patient.read"
+      - "patient/Observation.read"
+      - "patient/Condition.read"
+    revocation_prefix: "hospital-a"
+
+  - issuer_url: "https://hospital-b.keycloak.local/realms/clinic"
+    tenant_id: "hospital-b"
+    jwks_endpoint: "https://hospital-b.keycloak.local/realms/clinic/protocol/openid-connect/certs"
+    audience: "fhir-privacy-proxy"
+    policy_bundle: "hospital-b"
+    token_ttl: "15m"
+    allowed_scopes:
+      - "patient/Patient.read"
+      - "patient/Observation.read"
+    revocation_prefix: "hospital-b"
