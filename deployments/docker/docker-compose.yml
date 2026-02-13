@@ -6,9 +6,14 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
+      # Force issuer claim to use localhost so tokens obtained from the host
+      # match the issuer_url in tenants.yaml.
+      KC_HOSTNAME_URL: http://localhost:8180
     ports:
       - "8180:8180"
-    command: ["start-dev", "--http-port=8180"]
+    command: ["start-dev", "--http-port=8180", "--import-realm"]
+    volumes:
+      - ../keycloak:/opt/keycloak/data/import:ro
 
   opa:
     image: openpolicyagent/opa:latest-rootless
@@ -16,14 +21,26 @@ services:
       - "8181:8181"
     command: ["run", "--server", "--log-level=info", "/policies"]
     volumes:
-      - ./policies:/policies:ro
+      - ../../policies:/policies:ro
+
+  fhir:
+    image: hapiproject/hapi:latest
+    ports:
+      - "8090:8080"
 
   proxy:
-    build: .
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
     ports:
       - "8080:8080"
     depends_on:
       - keycloak
       - opa
+      - fhir
+    environment:
+      OPA_URL: http://opa:8181
+      FHIR_UPSTREAM: http://fhir:8080/fhir
+      TENANTS_CONFIG: /app/configs/tenants.yaml
     volumes:
-      - ./configs:/app/configs:ro
+      - ../../configs:/app/configs:ro

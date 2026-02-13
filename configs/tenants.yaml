@@ -1,7 +1,9 @@
 tenants:
   - issuer_url: "http://localhost:8180/realms/hospital-a"
     tenant_id: "hospital-a"
-    jwks_endpoint: "http://localhost:8180/realms/hospital-a/protocol/openid-connect/certs"
+    # Use docker service name so the proxy container can reach Keycloak.
+    # Keycloak's KC_HOSTNAME_URL ensures iss claim stays "localhost:8180".
+    jwks_endpoint: "http://keycloak:8180/realms/hospital-a/protocol/openid-connect/certs"
     audience: "fhir-privacy-proxy"
     policy_bundle: "hospital-a"
     allowed_scopes:
