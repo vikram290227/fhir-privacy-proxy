@@ -2,8 +2,11 @@ package tenant
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -22,21 +25,37 @@ type Registry struct {
 	mu      sync.RWMutex
 }
 
+type registryFile struct {
+	Tenants []Config `yaml:"tenants"`
+}
+
 func LoadRegistry(configPath string) (*Registry, error) {
-	// TODO: Load from YAML file
-	// For now, return a mock registry
-	return &Registry{
-		tenants: map[string]*Config{
-			"https://hospital-a.keycloak.local/realms/main": {
-				IssuerURL:    "https://hospital-a.keycloak.local/realms/main",
-				TenantID:     "hospital-a",
-				JWKSEndpoint: "https://hospital-a.keycloak.local/realms/main/protocol/openid-connect/certs",
-				Audience:     "fhir-privacy-proxy",
-				PolicyBundle: "hospital-a",
-				TokenTTL:     15 * time.Minute,
-			},
-		},
-	}, nil
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading tenant config: %w", err)
+	}
+
+	var file registryFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("parsing tenant config: %w", err)
+	}
+
+	tenants := make(map[string]*Config, len(file.Tenants))
+	for i := range file.Tenants {
+		t := &file.Tenants[i]
+		if t.TokenTTL == 0 {
+			t.TokenTTL = 15 * time.Minute
+		}
+		tenants[t.IssuerURL] = t
+	}
+
+	return &Registry{tenants: tenants}, nil
+}
+
+func (r *Registry) GetAll() map[string]*Config {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.tenants
 }
 
 func (r *Registry) GetByIssuer(issuer string) (*Config, error) {

@@ -13,8 +13,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
-	"github.com/YOUR_USERNAME/fhir-privacy-proxy/internal/policy"
-	"github.com/YOUR_USERNAME/fhir-privacy-proxy/internal/tenant"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 )
 
 type Middleware struct {
@@ -87,8 +87,12 @@ func (m *Middleware) validateJWT(tokenString string) (jwt.MapClaims, *tenant.Con
 		return nil, nil, fmt.Errorf("jwks fetch failed: %w", err)
 	}
 
-	// Verify signature
-	token, err := jwt.Parse(tokenString, jwks.Keyfunc, jwt.WithValidMethods([]string{"RS256"}))
+	// Verify signature, audience, and issuer
+	token, err := jwt.Parse(tokenString, jwks.Keyfunc,
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithAudience(tenantConfig.Audience),
+		jwt.WithIssuer(tenantConfig.IssuerURL),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("signature validation failed: %w", err)
 	}
@@ -98,16 +102,6 @@ func (m *Middleware) validateJWT(tokenString string) (jwt.MapClaims, *tenant.Con
 	}
 
 	verified := token.Claims.(jwt.MapClaims)
-
-	// Validate audience
-	if !verified.VerifyAudience(tenantConfig.Audience, true) {
-		return nil, nil, fmt.Errorf("invalid audience")
-	}
-	// Validate issuer matches tenant
-	iss, _ := verified["iss"].(string)
-	if iss == "" || iss != tenantConfig.IssuerURL {
-		return nil, nil, fmt.Errorf("invalid issuer")
-	}
 
 	return verified, tenantConfig, nil
 }
