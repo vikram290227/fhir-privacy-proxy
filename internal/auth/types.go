@@ -15,6 +15,7 @@ type SubjectContext struct {
 	TenantID    string      `json:"tenant_id"`
 
 	BreakGlass *BreakGlassContext `json:"break_glass,omitempty"`
+	Policy     *PolicyDecision    `json:"policy,omitempty"`
 }
 
 type FHIRContext struct {
@@ -39,6 +40,12 @@ type BreakGlassContext struct {
 	Enabled       bool   `json:"enabled"`
 	Justification string `json:"justification"`
 	RequestedBy   string `json:"requested_by"`
+}
+
+type PolicyDecision struct {
+	Remove []string `json:"remove,omitempty"`
+	Mask   []string `json:"mask,omitempty"`
+	Reason string   `json:"reason,omitempty"`
 }
 
 type contextKey string
