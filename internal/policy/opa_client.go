@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"go.uber.org/zap"
 )
 
@@ -63,8 +64,7 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 		"resource": map[string]interface{}{
 			"type":       resourceType,
 			"patient_id": patientID,
-			// TODO: replace with real department mapping from FHIR server or request context
-			"department": "UNKNOWN",
+			"department": getSubjectDept(subject),
 		},
 	}
 
@@ -107,4 +107,16 @@ func splitFHIRPathParts(path string) []string {
 		return segs[2:]
 	}
 	return []string{}
+}
+
+// getSubjectDept extracts the department from the subject's FHIR context.
+// For the local MVP this makes resource.department match the requester's
+// department so valid_department_access passes for non-admin roles.
+func getSubjectDept(subject interface{}) string {
+	if s, ok := subject.(*auth.SubjectContext); ok {
+		if s.FHIRContext.Department != "" {
+			return s.FHIRContext.Department
+		}
+	}
+	return "UNKNOWN"
 }
