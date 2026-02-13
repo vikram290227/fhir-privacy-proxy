@@ -182,8 +182,8 @@ func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Co
 		Scopes: scopes,
 		Session: SessionInfo{
 			TokenID:   getStringClaim(claims, "jti"),
-			IssuedAt:  time.Unix(int64(claims["iat"].(float64)), 0),
-			ExpiresAt: time.Unix(int64(claims["exp"].(float64)), 0),
+			IssuedAt:  time.Unix(getNumericClaim(claims, "iat"), 0),
+			ExpiresAt: time.Unix(getNumericClaim(claims, "exp"), 0),
 		},
 		TenantID: config.TenantID,
 	}
@@ -216,7 +216,11 @@ func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Co
 func (m *Middleware) EnforcePolicy(opaClient *policy.OPAClient) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			subjectCtx := r.Context().Value(SubjectContextKey).(*SubjectContext)
+			subjectCtx, ok := r.Context().Value(SubjectContextKey).(*SubjectContext)
+			if !ok || subjectCtx == nil {
+				respondWithError(w, 500, "internal_error", "missing auth context")
+				return
+			}
 
 			decision, err := opaClient.Evaluate(r.Context(), subjectCtx, r)
 			if err != nil {
@@ -263,6 +267,13 @@ func getStringClaim(claims jwt.MapClaims, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func getNumericClaim(claims jwt.MapClaims, key string) int64 {
+	if val, ok := claims[key].(float64); ok {
+		return int64(val)
+	}
+	return 0
 }
 
 func contains(slice []string, item string) bool {
