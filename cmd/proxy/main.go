@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
+	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 )
@@ -162,31 +161,25 @@ func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger) 
 			return
 		}
 
-		// Parse JSON for redaction
-		var resource map[string]any
-		if err := json.Unmarshal(body, &resource); err != nil {
-			// Not valid JSON — pass through unchanged
-			copyResponseHeaders(w, upResp)
-			w.WriteHeader(upResp.StatusCode)
-			w.Write(body)
-			return
-		}
-
-		// Apply policy redaction
+		// Apply field-level redaction from OPA policy decision
+		var remove, mask []string
 		if subjectCtx.Policy != nil {
-			for _, path := range subjectCtx.Policy.Remove {
-				deleteField(resource, path)
-			}
-			for _, path := range subjectCtx.Policy.Mask {
-				maskField(resource, path)
-			}
+			remove = subjectCtx.Policy.Remove
+			mask = subjectCtx.Policy.Mask
 		}
 
-		// Write redacted response
+		redacted, err := fhirredact.ApplyRedactions(body, remove, mask)
+		if err != nil {
+			// Redaction failed (e.g. malformed JSON) — pass through unchanged
+			logger.Warn("redaction failed, passing through raw body", zap.Error(err))
+			redacted = body
+		}
+
+		// Write (possibly redacted) response
 		copyResponseHeaders(w, upResp)
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resource)
+		w.Write(redacted)
 	}
 }
 
@@ -199,66 +192,3 @@ func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
-// deleteField removes a dot-separated path from a nested map.
-// e.g. "name.text" removes the "text" key inside the "name" object.
-func deleteField(obj map[string]any, path string) {
-	parts := strings.Split(path, ".")
-	m := obj
-	for i, key := range parts {
-		if i == len(parts)-1 {
-			delete(m, key)
-			return
-		}
-		next, ok := m[key]
-		if !ok {
-			return
-		}
-		switch v := next.(type) {
-		case map[string]any:
-			m = v
-		case []any:
-			// Apply to every element in the array
-			remaining := strings.Join(parts[i+1:], ".")
-			for _, elem := range v {
-				if em, ok := elem.(map[string]any); ok {
-					deleteField(em, remaining)
-				}
-			}
-			return
-		default:
-			return
-		}
-	}
-}
-
-// maskField replaces the value at a dot-separated path with "***REDACTED***".
-func maskField(obj map[string]any, path string) {
-	parts := strings.Split(path, ".")
-	m := obj
-	for i, key := range parts {
-		if i == len(parts)-1 {
-			if _, exists := m[key]; exists {
-				m[key] = fmt.Sprintf("***REDACTED***")
-			}
-			return
-		}
-		next, ok := m[key]
-		if !ok {
-			return
-		}
-		switch v := next.(type) {
-		case map[string]any:
-			m = v
-		case []any:
-			remaining := strings.Join(parts[i+1:], ".")
-			for _, elem := range v {
-				if em, ok := elem.(map[string]any); ok {
-					maskField(em, remaining)
-				}
-			}
-			return
-		default:
-			return
-		}
-	}
-}
