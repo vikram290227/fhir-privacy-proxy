@@ -234,6 +234,12 @@ func (m *Middleware) EnforcePolicy(opaClient *policy.OPAClient) func(http.Handle
 				return
 			}
 
+			subjectCtx.Policy = &PolicyDecision{
+				Remove: decision.Remove,
+				Mask:   decision.Mask,
+				Reason: decision.Reason,
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	}
