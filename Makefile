@@ -13,13 +13,13 @@ clean:
 	rm -rf bin/
 
 up:
-	docker-compose up -d
+	docker-compose -f deployments/docker/docker-compose.yml up -d
 
 down:
-	docker-compose down
+	docker-compose -f deployments/docker/docker-compose.yml down
 
 logs:
-	docker-compose logs -f proxy
+	docker-compose -f deployments/docker/docker-compose.yml logs -f proxy
 
 fmt:
 	go fmt ./...

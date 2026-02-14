@@ -1,0 +1,137 @@
+{
+  "realm": "hospital-a",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "nurse", "description": "Nurse role" },
+      { "name": "doctor", "description": "Doctor role" },
+      { "name": "admin", "description": "Admin role with cross-department access" },
+      { "name": "can_break_glass", "description": "Allows emergency break-glass access" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "fhir-privacy-proxy",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "fhirContext-department",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "fhir_department",
+            "claim.name": "fhirContext.department",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "fhirContext-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "fhir_role",
+            "claim.name": "fhirContext.role",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "fhirContext-facility",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "fhir_facility",
+            "claim.name": "fhirContext.facility",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "fhir-privacy-proxy",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "nurse1",
+      "enabled": true,
+      "email": "nurse1@hospital-a.local",
+      "firstName": "Alice",
+      "lastName": "Nurse",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["nurse", "can_break_glass"],
+      "attributes": {
+        "fhir_department": ["cardiology"],
+        "fhir_role": ["nurse"],
+        "fhir_facility": ["main-hospital"]
+      }
+    },
+    {
+      "username": "doctor1",
+      "enabled": true,
+      "email": "doctor1@hospital-a.local",
+      "firstName": "Bob",
+      "lastName": "Doctor",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["doctor"],
+      "attributes": {
+        "fhir_department": ["cardiology"],
+        "fhir_role": ["doctor"],
+        "fhir_facility": ["main-hospital"]
+      }
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "email": "admin1@hospital-a.local",
+      "firstName": "Carol",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["admin", "doctor", "can_break_glass"],
+      "attributes": {
+        "fhir_department": ["administration"],
+        "fhir_role": ["doctor"],
+        "fhir_facility": ["main-hospital"]
+      }
+    }
+  ]
+}
