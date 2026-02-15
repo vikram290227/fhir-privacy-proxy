@@ -33,7 +33,7 @@ services:
       context: ../..
       dockerfile: deployments/docker/Dockerfile
     ports:
-      - "8085:8080"
+      - "8080:8080"
     depends_on:
       - keycloak
       - opa

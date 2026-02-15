@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
-	//"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"go.uber.org/zap"
 )
 
@@ -36,11 +35,9 @@ type opaResponse struct {
 
 func NewOPAClient(baseURL string, logger *zap.Logger) *OPAClient {
 	return &OPAClient{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 2 * time.Second,
-		},
-		logger: logger,
+		baseURL:    baseURL,
+		httpClient: &http.Client{},
+		logger:     logger,
 	}
 }
 
@@ -67,7 +64,7 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 		"resource": map[string]interface{}{
 			"type":       resourceType,
 			"patient_id": patientID,
-			"department": getResourceDeptFromRequest(r),
+			"department": getSubjectDept(subject),
 		},
 	}
 
@@ -115,19 +112,11 @@ func splitFHIRPathParts(path string) []string {
 // getSubjectDept extracts the department from the subject's FHIR context.
 // For the local MVP this makes resource.department match the requester's
 // department so valid_department_access passes for non-admin roles.
-//
-//	func getSubjectDept(subject interface{}) string {
-//		if s, ok := subject.(*auth.SubjectContext); ok {
-//			if s.FHIRContext.Department != "" {
-//				return s.FHIRContext.Department
-//			}
-//		}
-//		return "UNKNOWN"
-//	}
-func getResourceDeptFromRequest(r *http.Request) string {
-	// TEMP for local testing. Later: look up from upstream FHIR or mapping table.
-	if d := r.Header.Get("X-Resource-Department"); d != "" {
-		return d
+func getSubjectDept(subject interface{}) string {
+	if s, ok := subject.(*auth.SubjectContext); ok {
+		if s.FHIRContext.Department != "" {
+			return s.FHIRContext.Department
+		}
 	}
 	return "UNKNOWN"
 }
