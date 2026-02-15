@@ -11,6 +11,7 @@ const redactedValue = "***REDACTED***"
 // ApplyRedactions takes raw JSON bytes and applies field-level redaction.
 // - remove: dot-separated paths whose keys are deleted entirely
 // - mask:   dot-separated paths whose values are replaced with "***REDACTED***"
+// Handles both single FHIR resources and Bundles (redacts each entry's resource).
 // Returns the modified JSON bytes.
 func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 	if len(remove) == 0 && len(mask) == 0 {
@@ -22,11 +23,19 @@ func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 		return nil, fmt.Errorf("redact: unmarshal: %w", err)
 	}
 
-	for _, path := range remove {
-		deleteAtPath(resource, strings.Split(path, "."))
-	}
-	for _, path := range mask {
-		maskAtPath(resource, strings.Split(path, "."))
+	// If this is a Bundle, redact each entry's resource individually
+	if resource["resourceType"] == "Bundle" {
+		if entries, ok := resource["entry"].([]any); ok {
+			for _, entry := range entries {
+				if entryMap, ok := entry.(map[string]any); ok {
+					if res, ok := entryMap["resource"].(map[string]any); ok {
+						redactResource(res, remove, mask)
+					}
+				}
+			}
+		}
+	} else {
+		redactResource(resource, remove, mask)
 	}
 
 	out, err := json.Marshal(resource)
@@ -34,6 +43,16 @@ func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 		return nil, fmt.Errorf("redact: marshal: %w", err)
 	}
 	return out, nil
+}
+
+// redactResource applies remove and mask operations to a single FHIR resource map.
+func redactResource(resource map[string]any, remove, mask []string) {
+	for _, path := range remove {
+		deleteAtPath(resource, strings.Split(path, "."))
+	}
+	for _, path := range mask {
+		maskAtPath(resource, strings.Split(path, "."))
+	}
 }
 
 // deleteAtPath removes the leaf key from a nested map/slice structure.
