@@ -95,8 +95,12 @@ valid_department_access if {
     "admin" in input.subject.roles
 }
 
+# Subject must have a known department assigned (not UNKNOWN or empty).
+# Resource-level department matching requires post-fetch evaluation
+# and will be added when consent-based access is implemented.
 valid_department_access if {
-    input.subject.fhir_context.department == input.resource.department
+    input.subject.fhir_context.department != "UNKNOWN"
+    input.subject.fhir_context.department != ""
 }
 
 is_sensitive_patient if {
