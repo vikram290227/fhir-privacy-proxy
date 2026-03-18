@@ -1,0 +1,56 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build -o proxy ./cmd/proxy
+
+      - name: Test
+        run: go test ./...
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t fhir-privacy-proxy:${{ github.sha }} \
+            -f deployments/docker/Dockerfile .
+
+      - name: Run with Azure Audit Logging
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          AZURE_AUDIT_CONTAINER: ${{ secrets.AZURE_AUDIT_CONTAINER }}
+        run: |
+          docker run -d \
+            -e AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT}" \
+            -e AZURE_STORAGE_KEY="${AZURE_STORAGE_KEY}" \
+            -e AZURE_AUDIT_CONTAINER="${AZURE_AUDIT_CONTAINER}" \
+            -e OPA_URL=http://opa:8181 \
+            -e FHIR_UPSTREAM=http://fhir:8080/fhir \
+            -p 8080:8080 \
+            fhir-privacy-proxy:${{ github.sha }}
