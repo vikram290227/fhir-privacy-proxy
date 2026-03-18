@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/vikram290227/fhir-privacy-proxy/internal/audit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/cache"
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
@@ -76,6 +77,24 @@ func main() {
 		logger.Info("REDIS_ADDR not set, token revocation disabled")
 	}
 
+	// Initialize Azure audit logger (optional)
+	var auditLogger *audit.Logger
+	if auditCfg := audit.ConfigFromEnv(); auditCfg != nil {
+		var auditErr error
+		auditLogger, auditErr = audit.NewLogger(auditCfg, logger)
+		if auditErr != nil {
+			logger.Warn("audit logger init failed, continuing without audit", zap.Error(auditErr))
+		} else {
+			logger.Info("audit logger enabled",
+				zap.String("account", auditCfg.AccountName),
+				zap.String("container", auditCfg.ContainerName),
+			)
+			defer auditLogger.Close()
+		}
+	} else {
+		logger.Info("AZURE_STORAGE_ACCOUNT not set, audit logging disabled")
+	}
+
 	// Setup router
 	r := chi.NewRouter()
 
@@ -115,7 +134,7 @@ func main() {
 		r.Use(authMiddleware.ValidateToken)
 		r.Use(authMiddleware.EnforcePolicy(opaClient))
 
-		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger)))
+		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditLogger)))
 	})
 
 	srv := &http.Server{
@@ -148,7 +167,7 @@ func main() {
 	logger.Info("server exited")
 }
 
-func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger) http.HandlerFunc {
+func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, auditLogger *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		subjectCtx, ok := r.Context().Value(auth.SubjectContextKey).(*auth.SubjectContext)
 		if !ok || subjectCtx == nil {
@@ -230,6 +249,37 @@ func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger) 
 		w.Header().Set("Content-Type", "application/fhir+json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(redacted)
+
+		// Emit audit event asynchronously
+		if auditLogger != nil {
+			durationMs := time.Since(start).Milliseconds()
+			evt := audit.AuditEvent{
+				EventType:    audit.EventAccess,
+				TenantID:     subjectCtx.TenantID,
+				SubjectID:    subjectCtx.SubjectID,
+				Roles:        subjectCtx.Roles,
+				ClientID:     subjectCtx.Client.ID,
+				Method:       r.Method,
+				Path:         r.URL.Path,
+				ResourceType: resourceType,
+				StatusCode:   http.StatusOK,
+				PolicyResult: "allow",
+				DurationMs:   durationMs,
+			}
+			// Capture redaction details
+			if len(remove) > 0 || len(mask) > 0 {
+				evt.RedactedPaths = append(remove, mask...)
+			}
+			// Capture break-glass events
+			if subjectCtx.BreakGlass != nil && subjectCtx.BreakGlass.Enabled {
+				evt.EventType = audit.EventBreakGlass
+				evt.BreakGlass = &audit.BreakGlassDetail{
+					Justification: subjectCtx.BreakGlass.Justification,
+					RequestedBy:   subjectCtx.BreakGlass.RequestedBy,
+				}
+			}
+			auditLogger.Log(evt)
+		}
 	}
 }
 
