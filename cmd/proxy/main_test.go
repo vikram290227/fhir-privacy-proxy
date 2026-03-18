@@ -12,7 +12,7 @@ import (
 )
 
 func TestFhirProxyHandler_NoAuthContext(t *testing.T) {
-	handler := fhirProxyHandler("http://localhost:8090/fhir", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler("http://localhost:8090/fhir", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
 	w := httptest.NewRecorder()
@@ -25,7 +25,7 @@ func TestFhirProxyHandler_NoAuthContext(t *testing.T) {
 }
 
 func TestFhirProxyHandler_UpstreamUnreachable(t *testing.T) {
-	handler := fhirProxyHandler("http://localhost:1", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler("http://localhost:1", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
 	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
@@ -60,7 +60,7 @@ func TestFhirProxyHandler_ProxiesAndRedacts(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
 	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
@@ -114,7 +114,7 @@ func TestFhirProxyHandler_NoRedactionPolicy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
 	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
@@ -146,7 +146,7 @@ func TestFhirProxyHandler_NonJSONPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient/999", nil)
 	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
@@ -179,7 +179,7 @@ func TestFhirProxyHandler_QueryParams(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t))
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), nil)
 
 	req := httptest.NewRequest("GET", "/fhir/r4/Patient?name=Smith", nil)
 	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{

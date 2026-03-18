@@ -50,5 +50,9 @@ services:
       FHIR_UPSTREAM: http://fhir:8080/fhir
       TENANTS_CONFIG: /app/configs/tenants.yaml
       REDIS_ADDR: redis:6379
+      # Azure audit logging (set these to enable)
+      # AZURE_STORAGE_ACCOUNT: <your-storage-account>
+      # AZURE_STORAGE_KEY: <your-storage-key>
+      # AZURE_AUDIT_CONTAINER: fhir-audit-logs
     volumes:
       - ../../configs:/app/configs:ro
