@@ -1,4 +1,4 @@
-.PHONY: build run test clean up down logs
+.PHONY: build run test test-cover clean up down logs fmt lint
 
 build:
 	go build -o bin/proxy cmd/proxy/main.go
@@ -9,8 +9,12 @@ run:
 test:
 	go test -v ./...
 
+test-cover:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
 clean:
-	rm -rf bin/
+	rm -rf bin/ coverage.out coverage.html
 
 up:
 	docker-compose -f deployments/docker/docker-compose.yml up -d
@@ -23,3 +27,6 @@ logs:
 
 fmt:
 	go fmt ./...
+
+lint:
+	go vet ./...

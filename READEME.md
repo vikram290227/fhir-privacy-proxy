@@ -1,69 +1,89 @@
-# FHIR Privacy Proxy - MVP
+# FHIR Privacy Proxy
 
-Working SMART-on-FHIR authentication and authorization proxy.
+SMART-on-FHIR authentication and authorization proxy with field-level redaction.
 
-## What This MVP Includes
+## Features
 
-✅ JWT validation with JWKS (auto-refresh)
-✅ Multi-tenant support (issuer-based routing)
-✅ OPA policy enforcement (external container)
-✅ Break-glass emergency access
-✅ FHIR context claims (department, role, facility)
-✅ Structured audit logging
-
-## What's NOT in MVP (Future)
-
-❌ Redis token revocation cache
-❌ Embedded OPA (using HTTP instead)
-❌ FHIR server proxy/filtering
-❌ Keycloak event webhooks
-
-## Quick Start
-
-```bash
-# 1. Start services
-docker-compose up -d
-
-# 2. Wait for Keycloak to start (about 30 seconds)
-# Check: http://localhost:8180
-
-# 3. Configure Keycloak
-# - Create realm: hospital-a
-# - Create client: fhir-privacy-proxy
-# - Create user with roles: nurse, can_break_glass
-# - Add user attribute: department = ED
-# - Create protocol mapper for fhirContext claim
-
-# 4. Test the proxy
-curl http://localhost:8080/health
-# Should return: OK
-
-# 5. Get token from Keycloak and test
-# (See docs/testing.md for full curl examples)
-```
+- JWT validation with JWKS (auto-refresh, per-tenant caching)
+- Multi-tenant support (issuer-based routing)
+- OPA policy enforcement (external container via HTTP)
+- Break-glass emergency access override with audit logging
+- FHIR context claims (department, role, facility)
+- Field-level redaction (remove/mask) based on OPA policy decisions
+- Bundle-aware redaction (redacts each entry individually)
+- Redis token revocation cache with Keycloak webhook integration
+- Scope validation against tenant-allowed scopes
+- Prometheus metrics endpoint (`/metrics`)
+- OpenTelemetry distributed tracing
+- Structured audit logging (zap)
+- Docker Compose orchestration with all dependencies
 
 ## Architecture
 
 ```
-Client → [JWT] → Proxy → OPA → Decision
-                   ↓
-              Keycloak (JWKS)
+Client → [JWT] → Proxy (8080) → Upstream FHIR (8090)
+                    │
+                    ├─ Keycloak (8180) [JWKS validation]
+                    ├─ OPA (8181)      [Policy decisions]
+                    └─ Redis (6379)    [Token revocation]
 ```
 
-## Testing Without Keycloak
+**Request flow:**
+1. `ValidateToken` — verifies JWT signature, audience, issuer via tenant JWKS
+2. Revocation check — optionally checks Redis for revoked tokens
+3. Scope validation — ensures token scopes match tenant-allowed scopes
+4. `EnforcePolicy` — calls OPA for allow/deny + redaction rules
+5. `fhirProxyHandler` — forwards to upstream, applies field-level redaction
 
-Use this JWT (expired, for structure reference):
+## Quick Start
+
+```bash
+# Start all services
+make up
+
+# Wait for Keycloak (~30s), then test health
+curl http://localhost:8080/health
+
+# Get a token and test
+./scripts/get_token.sh nurse1 password
+./scripts/test_patient.sh
 ```
-eyJhbGc...
+
+## Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Health check |
+| `GET /metrics` | Prometheus metrics |
+| `POST /webhook/revoke` | Keycloak token revocation webhook |
+| `GET /fhir/r4/*` | Protected FHIR proxy (requires JWT) |
+
+## Configuration
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `TENANTS_CONFIG` | `configs/tenants.yaml` | Path to tenant registry |
+| `OPA_URL` | `http://opa:8181` | OPA server URL |
+| `FHIR_UPSTREAM` | `http://localhost:8090/fhir` | Upstream FHIR server |
+| `REDIS_ADDR` | (disabled) | Redis address for token revocation |
+
+## Test Users (Keycloak)
+
+| User | Password | Roles | Department |
+|---|---|---|---|
+| `nurse1` | `password` | nurse, can_break_glass | cardiology |
+| `doctor1` | `password` | doctor | cardiology |
+| `admin1` | `password` | admin, doctor, can_break_glass | administration |
+
+## Development
+
+```bash
+make build       # Compile binary
+make test        # Run all tests
+make test-cover  # Run tests with coverage report
+make fmt         # Format code
+make lint        # Run go vet
 ```
-
-## Next Steps
-
-1. Set up Keycloak realm and protocol mappers
-2. Create test users with fhirContext claims
-3. Test break-glass with X-Break-Glass header
-4. Add FHIR server proxy logic
-5. Implement field-level filtering
 
 ## License
 

@@ -15,14 +15,27 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/cache"
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/tracing"
 )
 
 func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
+
+	// Initialize OpenTelemetry tracing
+	shutdownTracer := tracing.Init()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracer(ctx); err != nil {
+			logger.Error("failed to shutdown tracer", zap.Error(err))
+		}
+	}()
 
 	// Load tenant registry from YAML
 	tenantPath := os.Getenv("TENANTS_CONFIG")
@@ -45,6 +58,24 @@ func main() {
 	// Initialize auth middleware
 	authMiddleware := auth.NewMiddleware(tenantRegistry, logger)
 
+	// Initialize Redis revocation cache (optional)
+	var revocationCache *cache.RevocationCache
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr != "" {
+		revocationCache = cache.NewRevocationCache(redisAddr, logger)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := revocationCache.Ping(ctx); err != nil {
+			logger.Warn("redis unavailable, token revocation disabled", zap.Error(err))
+			revocationCache = nil
+		} else {
+			logger.Info("redis connected, token revocation enabled", zap.String("addr", redisAddr))
+			authMiddleware.SetRevocationChecker(revocationCache)
+		}
+		cancel()
+	} else {
+		logger.Info("REDIS_ADDR not set, token revocation disabled")
+	}
+
 	// Setup router
 	r := chi.NewRouter()
 
@@ -53,12 +84,22 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(tracing.Middleware)
+	r.Use(metrics.InstrumentHandler)
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+
+	// Prometheus metrics endpoint
+	r.Handle("/metrics", metrics.Handler())
+
+	// Keycloak webhook endpoint for token revocation
+	if revocationCache != nil {
+		r.Post("/webhook/revoke", revocationCache.HandleWebhook)
+	}
 
 	// Upstream FHIR server
 	fhirUpstream := os.Getenv("FHIR_UPSTREAM")
@@ -122,8 +163,13 @@ func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger) 
 			upstreamURL += "?" + r.URL.RawQuery
 		}
 
+		// Add tracing span for upstream call
+		ctx, span := tracing.Tracer().Start(r.Context(), "upstream.fhir")
+		defer span.End()
+
 		// Forward the request to the upstream FHIR server
-		upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, r.Body)
+		start := time.Now()
+		upReq, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, r.Body)
 		if err != nil {
 			logger.Error("failed to create upstream request", zap.Error(err))
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -144,6 +190,10 @@ func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger) 
 			return
 		}
 		defer upResp.Body.Close()
+
+		// Record upstream latency
+		resourceType := extractResourceType(r.URL.Path)
+		metrics.UpstreamDuration.WithLabelValues(r.Method, resourceType).Observe(time.Since(start).Seconds())
 
 		body, err := io.ReadAll(upResp.Body)
 		if err != nil {
@@ -192,3 +242,11 @@ func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
+// extractResourceType extracts the FHIR resource type from the request path.
+func extractResourceType(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "fhir" && parts[1] == "r4" {
+		return parts[2]
+	}
+	return "unknown"
+}
