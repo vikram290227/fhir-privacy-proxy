@@ -17,11 +17,18 @@ import (
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 )
 
+// RevocationChecker is an interface for checking token revocation.
+// This allows the middleware to optionally check Redis for revoked tokens.
+type RevocationChecker interface {
+	IsRevoked(tenantID, jti string, exp int64) (bool, error)
+}
+
 type Middleware struct {
-	tenantRegistry *tenant.Registry
-	jwksCache      map[string]*keyfunc.JWKS
-	jwksMu         sync.Mutex
-	logger         *zap.Logger
+	tenantRegistry     *tenant.Registry
+	jwksCache          map[string]*keyfunc.JWKS
+	jwksMu             sync.Mutex
+	logger             *zap.Logger
+	revocationChecker  RevocationChecker
 }
 
 func NewMiddleware(tenantRegistry *tenant.Registry, logger *zap.Logger) *Middleware {
@@ -30,6 +37,11 @@ func NewMiddleware(tenantRegistry *tenant.Registry, logger *zap.Logger) *Middlew
 		jwksCache:      make(map[string]*keyfunc.JWKS),
 		logger:         logger,
 	}
+}
+
+// SetRevocationChecker enables token revocation checking via Redis.
+func (m *Middleware) SetRevocationChecker(rc RevocationChecker) {
+	m.revocationChecker = rc
 }
 
 func (m *Middleware) ValidateToken(next http.Handler) http.Handler {
@@ -47,10 +59,37 @@ func (m *Middleware) ValidateToken(next http.Handler) http.Handler {
 			return
 		}
 
+		// Check token revocation if checker is configured
+		if m.revocationChecker != nil {
+			jti := getStringClaim(claims, "jti")
+			exp := getNumericClaim(claims, "exp")
+			if jti != "" {
+				revoked, err := m.revocationChecker.IsRevoked(tenantConfig.TenantID, jti, exp)
+				if err != nil {
+					m.logger.Warn("revocation check failed, allowing request", zap.Error(err))
+				} else if revoked {
+					respondWithError(w, 401, "token_revoked", "token has been revoked")
+					return
+				}
+			}
+		}
+
 		subjectCtx, err := m.buildSubjectContext(claims, tenantConfig, r)
 		if err != nil {
 			respondWithError(w, 400, "invalid_claims", err.Error())
 			return
+		}
+
+		// Validate scopes against tenant's allowed scopes
+		if len(tenantConfig.AllowedScopes) > 0 && len(subjectCtx.Scopes) > 0 {
+			if !hasValidScope(subjectCtx.Scopes, tenantConfig.AllowedScopes) {
+				m.logger.Warn("insufficient scopes",
+					zap.String("subject", subjectCtx.SubjectID),
+					zap.Strings("scopes", subjectCtx.Scopes),
+					zap.Strings("allowed", tenantConfig.AllowedScopes))
+				respondWithError(w, 403, "insufficient_scope", "token scopes do not match required scopes")
+				return
+			}
 		}
 
 		if !subjectCtx.HasRoles {
@@ -285,6 +324,20 @@ func getNumericClaim(claims jwt.MapClaims, key string) int64 {
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// hasValidScope checks that at least one token scope matches the tenant's allowed scopes.
+func hasValidScope(tokenScopes, allowedScopes []string) bool {
+	allowed := make(map[string]bool, len(allowedScopes))
+	for _, s := range allowedScopes {
+		allowed[s] = true
+	}
+	for _, s := range tokenScopes {
+		if allowed[s] {
 			return true
 		}
 	}

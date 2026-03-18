@@ -23,6 +23,12 @@ services:
     volumes:
       - ../../policies:/policies:ro
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+
   fhir:
     image: hapiproject/hapi:latest
     ports:
@@ -38,9 +44,11 @@ services:
       - keycloak
       - opa
       - fhir
+      - redis
     environment:
       OPA_URL: http://opa:8181
       FHIR_UPSTREAM: http://fhir:8080/fhir
       TENANTS_CONFIG: /app/configs/tenants.yaml
+      REDIS_ADDR: redis:6379
     volumes:
       - ../../configs:/app/configs:ro
