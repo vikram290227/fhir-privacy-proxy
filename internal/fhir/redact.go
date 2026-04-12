@@ -11,8 +11,15 @@ const redactedValue = "***REDACTED***"
 // ApplyRedactions takes raw JSON bytes and applies field-level redaction.
 // - remove: dot-separated paths whose keys are deleted entirely
 // - mask:   dot-separated paths whose values are replaced with "***REDACTED***"
-// Handles both single FHIR resources and Bundles (redacts each entry's resource).
-// Returns the modified JSON bytes.
+//
+// The function handles:
+//   - Single FHIR resources (any resourceType)
+//   - FHIR Bundle resources (redacts every Bundle.entry[].resource)
+//   - Nested Bundles (Bundles whose entries contain Bundles)
+//   - Mixed resource types inside a single Bundle
+//
+// Returns the modified JSON bytes. If remove and mask are both empty the
+// original bytes are returned unchanged.
 func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 	if len(remove) == 0 && len(mask) == 0 {
 		return jsonBytes, nil
@@ -23,20 +30,7 @@ func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 		return nil, fmt.Errorf("redact: unmarshal: %w", err)
 	}
 
-	// If this is a Bundle, redact each entry's resource individually
-	if resource["resourceType"] == "Bundle" {
-		if entries, ok := resource["entry"].([]any); ok {
-			for _, entry := range entries {
-				if entryMap, ok := entry.(map[string]any); ok {
-					if res, ok := entryMap["resource"].(map[string]any); ok {
-						redactResource(res, remove, mask)
-					}
-				}
-			}
-		}
-	} else {
-		redactResource(resource, remove, mask)
-	}
+	redactAny(resource, remove, mask)
 
 	out, err := json.Marshal(resource)
 	if err != nil {
@@ -45,12 +39,47 @@ func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 	return out, nil
 }
 
+// redactAny is the recursive entry point: if the object is a Bundle it
+// descends into every entry's resource (which may itself be a Bundle),
+// otherwise it applies the remove/mask paths directly to the resource.
+func redactAny(resource map[string]any, remove, mask []string) {
+	if resource == nil {
+		return
+	}
+
+	if resource["resourceType"] == "Bundle" {
+		entries, ok := resource["entry"].([]any)
+		if !ok {
+			return
+		}
+		for _, entry := range entries {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if inner, ok := entryMap["resource"].(map[string]any); ok {
+				// Recurse — handles nested Bundles and mixed resource types.
+				redactAny(inner, remove, mask)
+			}
+		}
+		return
+	}
+
+	redactResource(resource, remove, mask)
+}
+
 // redactResource applies remove and mask operations to a single FHIR resource map.
 func redactResource(resource map[string]any, remove, mask []string) {
 	for _, path := range remove {
+		if path == "" {
+			continue
+		}
 		deleteAtPath(resource, strings.Split(path, "."))
 	}
 	for _, path := range mask {
+		if path == "" {
+			continue
+		}
 		maskAtPath(resource, strings.Split(path, "."))
 	}
 }
