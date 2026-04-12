@@ -34,6 +34,13 @@ services:
     ports:
       - "8090:8080"
 
+  risk:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.risk
+    ports:
+      - "8000:8000"
+
   proxy:
     build:
       context: ../..
@@ -45,16 +52,23 @@ services:
       - opa
       - fhir
       - redis
+      - risk
     env_file:
       - ../../.env
     environment:
       OPA_URL: http://opa:8181
       FHIR_UPSTREAM: http://fhir:8080/fhir
+      RISK_SERVICE_URL: http://risk:8000
+      AUDIT_LOG_FILE: /app/audit/audit.ndjson
       TENANTS_CONFIG: /app/configs/tenants.yaml
       REDIS_ADDR: redis:6379
-      # Azure audit logging (set these to enable)
+      # Azure audit logging (leave unset when AUDIT_LOG_FILE is set)
       # AZURE_STORAGE_ACCOUNT: <your-storage-account>
       # AZURE_STORAGE_KEY: <your-storage-key>
       # AZURE_AUDIT_CONTAINER: fhir-audit-logs
     volumes:
       - ../../configs:/app/configs:ro
+      - proxy-audit:/app/audit
+
+volumes:
+  proxy-audit: {}
