@@ -20,6 +20,7 @@ import (
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/risk"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tracing"
 )
@@ -77,22 +78,33 @@ func main() {
 		logger.Info("REDIS_ADDR not set, token revocation disabled")
 	}
 
-	// Initialize Azure audit logger (optional)
-	var auditLogger *audit.Logger
-	if auditCfg := audit.ConfigFromEnv(); auditCfg != nil {
-		var auditErr error
-		auditLogger, auditErr = audit.NewLogger(auditCfg, logger)
+	// Initialize audit logger. The proxy prefers a persistent local
+	// file (AUDIT_LOG_FILE) for dev/demo and falls back to Azure Blob
+	// Storage when AZURE_STORAGE_ACCOUNT is set.
+	var auditSink audit.Sink
+	if filePath := audit.FileLoggerPath(); filePath != "" {
+		fileLogger, fileErr := audit.NewFileLogger(filePath, logger)
+		if fileErr != nil {
+			logger.Warn("file audit logger init failed, continuing without audit", zap.Error(fileErr))
+		} else {
+			logger.Info("file audit logger enabled", zap.String("path", filePath))
+			defer fileLogger.Close()
+			auditSink = fileLogger
+		}
+	} else if auditCfg := audit.ConfigFromEnv(); auditCfg != nil {
+		azureLogger, auditErr := audit.NewLogger(auditCfg, logger)
 		if auditErr != nil {
 			logger.Warn("audit logger init failed, continuing without audit", zap.Error(auditErr))
 		} else {
-			logger.Info("audit logger enabled",
+			logger.Info("azure audit logger enabled",
 				zap.String("account", auditCfg.AccountName),
 				zap.String("container", auditCfg.ContainerName),
 			)
-			defer auditLogger.Close()
+			defer azureLogger.Close()
+			auditSink = azureLogger
 		}
 	} else {
-		logger.Info("AZURE_STORAGE_ACCOUNT not set, audit logging disabled")
+		logger.Info("AUDIT_LOG_FILE and AZURE_STORAGE_ACCOUNT not set, audit logging disabled")
 	}
 
 	// Setup router
@@ -129,12 +141,17 @@ func main() {
 
 	upstreamClient := &http.Client{Timeout: 30 * time.Second}
 
+	// Optional risk scoring client — enabled when RISK_SERVICE_URL is set.
+	riskClient := risk.NewClient(os.Getenv("RISK_SERVICE_URL"), logger)
+
 	// Protected FHIR endpoints
 	r.Route("/fhir/r4", func(r chi.Router) {
 		r.Use(authMiddleware.ValidateToken)
+		r.Use(authMiddleware.RequireSmartScope)
+		r.Use(authMiddleware.ScoreRisk(riskClient))
 		r.Use(authMiddleware.EnforcePolicy(opaClient))
 
-		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditLogger)))
+		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditSink)))
 	})
 
 	srv := &http.Server{
@@ -167,7 +184,7 @@ func main() {
 	logger.Info("server exited")
 }
 
-func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, auditLogger *audit.Logger) http.HandlerFunc {
+func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, auditLogger audit.Sink) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		subjectCtx, ok := r.Context().Value(auth.SubjectContextKey).(*auth.SubjectContext)
 		if !ok || subjectCtx == nil {

@@ -16,6 +16,18 @@ type SubjectContext struct {
 
 	BreakGlass *BreakGlassContext `json:"break_glass,omitempty"`
 	Policy     *PolicyDecision    `json:"policy,omitempty"`
+
+	// Risk contains the ML-derived anomaly score for this request.
+	// It is populated by the ScoreRisk middleware and consumed by OPA
+	// via the adaptive authorization policy.
+	Risk *RiskDecision `json:"risk,omitempty"`
+}
+
+// RiskDecision carries the AI risk assessment for a single request.
+type RiskDecision struct {
+	Score       float64            `json:"score"`
+	Label       string             `json:"label"`
+	Explanation map[string]float64 `json:"explanation,omitempty"`
 }
 
 type FHIRContext struct {

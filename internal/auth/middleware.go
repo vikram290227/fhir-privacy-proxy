@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
+	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 )
@@ -163,93 +164,65 @@ func (m *Middleware) getJWKS(config *tenant.Config) (*keyfunc.JWKS, error) {
 	return jwks, nil
 }
 
+// buildSubjectContext assembles the in-process SubjectContext from a
+// set of verified claims and the inbound request. It is a thin
+// orchestrator — all claim translation lives in claims.go, which is the
+// single source of truth for JWT → domain mapping.
 func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Config, r *http.Request) (*SubjectContext, error) {
-	sub, _ := claims["sub"].(string)
+	sub := extractSubjectID(claims)
 	if sub == "" {
 		return nil, fmt.Errorf("missing sub claim")
 	}
 
-	// Extract roles
-	var roles []string
-	if realmAccess, ok := claims["realm_access"].(map[string]interface{}); ok {
-		if rolesList, ok := realmAccess["roles"].([]interface{}); ok {
-			for _, role := range rolesList {
-				if roleStr, ok := role.(string); ok {
-					roles = append(roles, roleStr)
-				}
-			}
-		}
-	}
+	roles := extractRoles(claims)
 
-	// Extract FHIR context
-	fhirCtx := FHIRContext{
-		Department:  "UNKNOWN",
-		Facility:    "main-hospital",
-		Role:        "unknown",
-		SessionType: "clinical",
-	}
-
-	if fhirContext, ok := claims["fhirContext"].(map[string]interface{}); ok {
-		if dept, ok := fhirContext["department"].(string); ok {
-			fhirCtx.Department = dept
-		}
-		if role, ok := fhirContext["role"].(string); ok {
-			fhirCtx.Role = role
-		}
-		if facility, ok := fhirContext["facility"].(string); ok {
-			fhirCtx.Facility = facility
-		}
-	}
-
-	// Extract scopes
-	var scopes []string
-	if scopeStr, ok := claims["scope"].(string); ok {
-		scopes = strings.Split(scopeStr, " ")
-	}
-
-	// Build context
 	ctx := &SubjectContext{
 		SubjectID:   sub,
 		SubjectType: "practitioner",
 		Roles:       roles,
 		HasRoles:    len(roles) > 0,
-		FHIRContext: fhirCtx,
-		Client: ClientInfo{
-			ID:   getStringClaim(claims, "azp", "client_id"),
-			Name: getStringClaim(claims, "azp", "client_id"),
-		},
-		Scopes: scopes,
-		Session: SessionInfo{
-			TokenID:   getStringClaim(claims, "jti"),
-			IssuedAt:  time.Unix(getNumericClaim(claims, "iat"), 0),
-			ExpiresAt: time.Unix(getNumericClaim(claims, "exp"), 0),
-		},
-		TenantID: config.TenantID,
+		FHIRContext: extractFHIRContext(claims),
+		Client:      extractClientInfo(claims),
+		Scopes:      extractScopes(claims),
+		Session:     extractSession(claims),
+		TenantID:    config.TenantID,
 	}
 
-	// Check for break-glass
-	if r.Header.Get("X-Break-Glass") == "true" {
-		if !contains(roles, "can_break_glass") {
-			return nil, fmt.Errorf("break-glass attempted without permission")
-		}
-
-		justification := r.Header.Get("X-Break-Glass-Justification")
-		if justification == "" {
-			return nil, fmt.Errorf("break-glass requires justification")
-		}
-
-		ctx.BreakGlass = &BreakGlassContext{
-			Enabled:       true,
-			Justification: justification,
-			RequestedBy:   sub,
-		}
-
-		m.logger.Warn("BREAK_GLASS_ACCESS",
-			zap.String("subject", sub),
-			zap.String("justification", justification))
+	bg, err := m.resolveBreakGlass(r, sub, roles)
+	if err != nil {
+		return nil, err
 	}
+	ctx.BreakGlass = bg
 
 	return ctx, nil
+}
+
+// resolveBreakGlass inspects the X-Break-Glass headers and returns a
+// BreakGlassContext when the request is claiming an emergency override.
+// The subject must carry the `can_break_glass` role AND provide a
+// non-empty justification, otherwise an error is returned and the
+// request is denied at the auth layer.
+func (m *Middleware) resolveBreakGlass(r *http.Request, sub string, roles []string) (*BreakGlassContext, error) {
+	if r.Header.Get("X-Break-Glass") != "true" {
+		return nil, nil
+	}
+	if !contains(roles, "can_break_glass") {
+		return nil, fmt.Errorf("break-glass attempted without permission")
+	}
+	justification := r.Header.Get("X-Break-Glass-Justification")
+	if justification == "" {
+		return nil, fmt.Errorf("break-glass requires justification")
+	}
+
+	m.logger.Warn("BREAK_GLASS_ACCESS",
+		zap.String("subject", sub),
+		zap.String("justification", justification))
+
+	return &BreakGlassContext{
+		Enabled:       true,
+		Justification: justification,
+		RequestedBy:   sub,
+	}, nil
 }
 
 func (m *Middleware) EnforcePolicy(opaClient *policy.OPAClient) func(http.Handler) http.Handler {
@@ -261,17 +234,23 @@ func (m *Middleware) EnforcePolicy(opaClient *policy.OPAClient) func(http.Handle
 				return
 			}
 
+			start := time.Now()
 			decision, err := opaClient.Evaluate(r.Context(), subjectCtx, r)
+			metrics.PolicyEvalDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
 				m.logger.Error("policy evaluation failed", zap.Error(err))
+				metrics.PolicyOutcome.WithLabelValues(subjectCtx.TenantID, "error", "policy_error").Inc()
 				respondWithError(w, 500, "policy_error", "Authorization check failed")
 				return
 			}
 
 			if !decision.Allow {
+				metrics.PolicyOutcome.WithLabelValues(subjectCtx.TenantID, "deny", decision.Reason).Inc()
 				respondWithError(w, 403, "access_denied", decision.Reason)
 				return
 			}
+
+			metrics.PolicyOutcome.WithLabelValues(subjectCtx.TenantID, "allow", decision.Reason).Inc()
 
 			subjectCtx.Policy = &PolicyDecision{
 				Remove: decision.Remove,

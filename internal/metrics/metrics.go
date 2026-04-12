@@ -82,6 +82,45 @@ var (
 			Help: "Number of active connections",
 		},
 	)
+
+	// PolicyEvalDuration measures the latency of OPA policy evaluation
+	// (client-side round trip including network).
+	PolicyEvalDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fhir_proxy_policy_eval_duration_seconds",
+			Help:    "OPA policy evaluation latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	// PolicyOutcome counts allow vs deny decisions labelled by tenant
+	// and (optionally) the reason string returned by OPA.
+	PolicyOutcome = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_policy_outcome_total",
+			Help: "OPA policy allow/deny outcomes",
+		},
+		[]string{"tenant_id", "outcome", "reason"},
+	)
+
+	// RiskScores counts how many scores came back with each label
+	// ("normal", "suspicious", "anomalous").
+	RiskScores = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_risk_scores_total",
+			Help: "Risk scoring outcomes by label",
+		},
+		[]string{"label"},
+	)
+
+	// RiskScoreDuration tracks the risk service round trip latency.
+	RiskScoreDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fhir_proxy_risk_score_duration_seconds",
+			Help:    "Risk scoring service latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
 )
 
 func init() {
@@ -94,6 +133,10 @@ func init() {
 		BreakGlassAccesses,
 		TokenRevocations,
 		ActiveConnections,
+		PolicyEvalDuration,
+		PolicyOutcome,
+		RiskScores,
+		RiskScoreDuration,
 	)
 }
 

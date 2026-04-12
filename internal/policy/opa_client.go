@@ -66,6 +66,9 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 			"patient_id": patientID,
 		},
 	}
+	// The SubjectContext carries a `risk` field via json tag, so the
+	// OPA policy can already reach it via `input.subject.risk.score`.
+	// No additional hoisting is needed.
 
 	body, err := json.Marshal(opaRequest{Input: input})
 	if err != nil {
