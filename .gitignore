@@ -27,3 +27,8 @@ go.work
 
 # OS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
