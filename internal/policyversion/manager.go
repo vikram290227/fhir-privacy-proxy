@@ -17,12 +17,33 @@
 package policyversion
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
+
+// OPAAdmin is the narrow interface the version manager needs to push a
+// bundle into OPA. It is satisfied by *policy.OPAAdmin. Defined here to
+// keep policyversion free of the policy package import cycle and to let
+// tests inject a mock.
+type OPAAdmin interface {
+	PutPolicy(ctx context.Context, id string, rego []byte) error
+	DeletePolicy(ctx context.Context, id string) error
+}
+
+// opaPolicyID is the OPA policy id the manager uses when uploading the
+// active authz.rego. Using a fixed id means every Activate/Rollback
+// replaces the same module — OPA's PUT is idempotent by id, so the
+// bundle OPA is running always matches the active pointer.
+const opaPolicyID = "authz"
+
+// opaPushTimeout bounds the upload RPC so a stuck OPA doesn't deadlock
+// an Activate/Rollback call.
+const opaPushTimeout = 10 * time.Second
 
 // Bundle describes a single policy version on disk.
 type Bundle struct {
@@ -32,11 +53,12 @@ type Bundle struct {
 
 // Manager owns the set of known bundles and the active pointer.
 type Manager struct {
-	root     string
-	bundles  []Bundle
-	active   string
-	history  []string // stack of previous active versions for rollback
-	mu       sync.RWMutex
+	root    string
+	bundles []Bundle
+	active  string
+	history []string // stack of previous active versions for rollback
+	admin   OPAAdmin
+	mu      sync.RWMutex
 }
 
 // New scans root/versions/* for bundles and marks the highest numeric
@@ -113,28 +135,33 @@ func (m *Manager) Active() string {
 	return m.active
 }
 
-// Activate switches the active pointer to version. The previous
-// active version is pushed onto the history stack so Rollback can
-// walk back one step at a time.
+// SetOPAAdmin wires the OPA admin client the manager should use to
+// push the active bundle on Activate / Rollback. Passing nil makes
+// Activate/Rollback update only the in-memory pointer (useful for
+// tests and for dry-run tooling).
+func (m *Manager) SetOPAAdmin(admin OPAAdmin) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.admin = admin
+}
+
+// Activate switches the active pointer to version AND uploads the
+// corresponding authz.rego to OPA. If the upload fails the in-memory
+// pointer is not changed, so the manager's view stays consistent with
+// the bundle OPA is actually running. The previous active version is
+// pushed onto the history stack only after a successful upload so
+// Rollback can walk back one step at a time.
 func (m *Manager) Activate(version string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	for _, b := range m.bundles {
-		if b.Version == version {
-			if m.active != "" && m.active != version {
-				m.history = append(m.history, m.active)
-			}
-			m.active = version
-			return nil
-		}
-	}
-	return fmt.Errorf("policyversion: unknown version %q", version)
+	return m.activateLocked(version, true)
 }
 
-// Rollback restores the previous active version. It pops one entry
-// off the history stack; calling Rollback repeatedly walks the entire
-// history in LIFO order.
+// Rollback restores the previous active version AND uploads its
+// authz.rego to OPA. If the OPA upload fails the in-memory pointer
+// stays on the current version and the history stack is untouched, so
+// the caller can retry safely. Calling Rollback repeatedly walks the
+// entire history in LIFO order.
 func (m *Manager) Rollback() (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -143,9 +170,64 @@ func (m *Manager) Rollback() (string, error) {
 		return "", fmt.Errorf("policyversion: no previous version to roll back to")
 	}
 	prev := m.history[len(m.history)-1]
+
+	// Peel the history entry off before calling activateLocked so the
+	// swap isn't recorded as a new forward step. Restore it on error.
 	m.history = m.history[:len(m.history)-1]
-	m.active = prev
+	if err := m.activateLocked(prev, false); err != nil {
+		m.history = append(m.history, prev)
+		return "", err
+	}
 	return prev, nil
+}
+
+// activateLocked is the shared core of Activate and Rollback. Caller
+// must hold m.mu for writing. When pushHistory is true the current
+// active version is pushed onto the stack before the swap (Activate
+// semantics). When false (Rollback) the caller is responsible for
+// having already managed the history stack.
+//
+// The order of operations matters for crash-safety:
+//
+//  1. Locate the target bundle and its authz.rego.
+//  2. Call OPA PutPolicy. If this fails, nothing else changes.
+//  3. Only after a 2xx from OPA do we flip m.active and push history.
+//
+// This guarantees that the in-memory pointer never disagrees with
+// what OPA is actually serving.
+func (m *Manager) activateLocked(version string, pushHistory bool) error {
+	var target *Bundle
+	for i := range m.bundles {
+		if m.bundles[i].Version == version {
+			target = &m.bundles[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("policyversion: unknown version %q", version)
+	}
+
+	// No-op when the caller re-activates the same version, but we still
+	// push the Rego to OPA so an externally-edited OPA store is forced
+	// back into the version the manager considers active.
+	if m.admin != nil {
+		regoPath := filepath.Join(target.Path, "authz.rego")
+		rego, err := os.ReadFile(regoPath)
+		if err != nil {
+			return fmt.Errorf("policyversion: read %s: %w", regoPath, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), opaPushTimeout)
+		defer cancel()
+		if err := m.admin.PutPolicy(ctx, opaPolicyID, rego); err != nil {
+			return fmt.Errorf("policyversion: opa upload %s: %w", version, err)
+		}
+	}
+
+	if pushHistory && m.active != "" && m.active != version {
+		m.history = append(m.history, m.active)
+	}
+	m.active = version
+	return nil
 }
 
 // ActivePath returns the absolute path for the active bundle. An
