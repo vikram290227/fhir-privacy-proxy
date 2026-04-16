@@ -47,6 +47,45 @@ services:
     ports:
       - "8000:8000"
 
+  # Jaeger all-in-one: receives OTLP/HTTP from the proxy on :4318 and
+  # serves the UI on :16686. Using the all-in-one image keeps this a
+  # single-container dependency — fine for local dev and for the
+  # "show the diagram works" story, but swap in a dedicated collector
+  # + storage backend for anything production-bound.
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # web UI
+      - "4318:4318"     # OTLP/HTTP receiver (spans from the proxy)
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    environment:
+      # Unauthenticated local-dev Grafana. DO NOT COPY to prod.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+
   proxy:
     build:
       context: ../..
@@ -59,6 +98,7 @@ services:
       - fhir
       - redis
       - risk
+      - jaeger
     env_file:
       - ../../.env
     environment:
@@ -68,6 +108,10 @@ services:
       AUDIT_LOG_FILE: /app/audit/audit.ndjson
       TENANTS_CONFIG: /app/configs/tenants.yaml
       REDIS_ADDR: redis:6379
+      # OTLP/HTTP endpoint for Jaeger's all-in-one receiver. Leave
+      # unset in environments without a collector — tracing.Init()
+      # falls back to a no-op exporter so /health stays clean.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       # Azure audit logging (leave unset when AUDIT_LOG_FILE is set)
       # AZURE_STORAGE_ACCOUNT: <your-storage-account>
       # AZURE_STORAGE_KEY: <your-storage-key>

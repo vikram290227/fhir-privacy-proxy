@@ -151,6 +151,64 @@ redacted paths, and break-glass detail.
 - `fhir_proxy_break_glass_total`
 - `fhir_proxy_auth_failures_total`
 
+## Observability stack
+
+The three observability signals — logs, metrics, and traces — are
+each served by a dedicated sidecar in `deployments/docker/docker-compose.yml`
+so an operator can ask "what is the proxy doing right now?" from any
+of three angles without touching the proxy process.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                         fhir-privacy-proxy                     │
+│                                                                │
+│   zap (stdout)       /metrics            OTel tracer           │
+│       │                  │                    │                │
+└───────┼──────────────────┼────────────────────┼────────────────┘
+        │                  │                    │
+        ▼                  ▼                    ▼
+   container logs    ┌──────────────┐    ┌──────────────┐
+     (docker logs)   │ Prometheus   │    │ Jaeger       │
+                     │  :9090       │    │ all-in-one   │
+                     │  scrape 5s   │    │ :4318 (OTLP) │
+                     └──────┬───────┘    │ :16686 (UI)  │
+                            │ query      └──────────────┘
+                            ▼
+                     ┌──────────────┐
+                     │ Grafana      │
+                     │ :3000        │
+                     │ provisioned  │
+                     │ dashboard    │
+                     └──────────────┘
+```
+
+**Tracing.** `internal/tracing/tracing.go` installs an OTLP/HTTP
+exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (the compose file
+points it at `http://jaeger:4318`) and falls back to a no-op exporter
+otherwise, so unit tests and `go run` stay side-effect free. Every
+span carries `service.name=fhir-privacy-proxy` and
+`service.version=<ldflag>` — set from `git describe` by the
+Makefile and from `--build-arg VERSION=…` by the Dockerfile — so
+a regression can be traced back to a specific commit in the Jaeger
+UI without cross-referencing a build log.
+
+**Metrics.** Prometheus scrapes two targets out of the box:
+`proxy:8080/metrics` (the `fhir_proxy_*` family above) and
+`risk:8000/metrics` (the `risk_model_*` gauges emitted by the
+Python service's `retrain_nightly.py` sidecar). Config lives at
+`deployments/prometheus/prometheus.yml`.
+
+**Dashboards.** `deployments/grafana/dashboards/dashboard.json` is
+auto-provisioned via `deployments/grafana/provisioning/` and
+presents the golden-signal cuts an on-call engineer actually needs:
+request rate by method + status, p50/p95/p99 latency for both the
+end-to-end request and the upstream FHIR call alone, a policy
+outcome piechart (allow/mask/deny keyed by reason), a risk score
+distribution (normal/suspicious/anomalous), break-glass events per
+tenant, auth failures by reason, and active connections. Grafana is
+provisioned in anonymous-admin mode for local dev — do **not**
+copy that configuration to production.
+
 ## Multi-tenant isolation
 
 The proxy runs as a single process but serves multiple hospitals (or

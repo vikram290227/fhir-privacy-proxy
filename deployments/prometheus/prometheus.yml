@@ -1,0 +1,30 @@
+# Prometheus scrape config mounted into the `prometheus` service in
+# docker-compose.yml. The two targets below correspond to the two
+# processes in this stack that publish /metrics:
+#
+#   * proxy:8080 — fhir_proxy_* gauges/counters/histograms emitted by
+#     internal/metrics/metrics.go.
+#   * risk:8000  — risk_model_* gauges emitted by ml/risk_service.py
+#     from the sidecar .meta.json.
+#
+# Scrape interval kept deliberately tight (5s) so the Grafana panels
+# respond quickly to traffic during demos. Raise to 15–30s in prod.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: fhir-proxy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['proxy:8080']
+        labels:
+          service: fhir-privacy-proxy
+
+  - job_name: risk-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['risk:8000']
+        labels:
+          service: risk-service

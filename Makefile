@@ -1,10 +1,16 @@
 .PHONY: build run test test-cover clean up down logs fmt lint
 
+# Stamp the build with a service.version attribute that shows up in
+# Jaeger / any OTLP collector. Falls back to a git-describe-ish string
+# so unreleased dev builds can still be distinguished.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/vikram290227/fhir-privacy-proxy/internal/tracing.ServiceVersion=$(VERSION)
+
 build:
-	go build -o bin/proxy cmd/proxy/main.go
+	go build -ldflags "$(LDFLAGS)" -o bin/proxy cmd/proxy/main.go
 
 run:
-	go run cmd/proxy/main.go
+	go run -ldflags "$(LDFLAGS)" cmd/proxy/main.go
 
 test:
 	go test -v ./...
