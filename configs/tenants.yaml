@@ -10,3 +10,23 @@ tenants:
       - "patient/Patient.read"
       - "patient/Observation.read"
       - "patient/Condition.read"
+    # Per-tenant sensitive patient list. Consumed by OPA via
+    # data.hospital_a.sensitive_patients (see policies/data.json).
+    sensitive_patients:
+      - "123"
+      - "999"
+
+  - issuer_url: "http://localhost:8180/realms/hospital-b"
+    tenant_id: "hospital-b"
+    jwks_endpoint: "http://keycloak:8180/realms/hospital-b/protocol/openid-connect/certs"
+    audience: "fhir-privacy-proxy-b"
+    policy_bundle: "hospital-b"
+    allowed_scopes:
+      - "patient/Patient.read"
+      - "patient/Observation.read"
+    # Hospital-B has a disjoint sensitive list. A token for hospital-a
+    # must never be able to observe or act on these IDs, and vice versa —
+    # this is verified by cmd/proxy/tenant_isolation_test.go.
+    sensitive_patients:
+      - "555"
+      - "777"

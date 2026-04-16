@@ -65,8 +65,9 @@ valid_department_access if {
     input.subject.fhir_context.department != ""
 }
 
+# Per-tenant sensitive-patient lookup — data.json is keyed by tenant_id.
 is_sensitive_patient if {
-    input.resource.patient_id in data.sensitive_patients
+    input.resource.patient_id in data[input.subject.tenant_id].sensitive_patients
 }
 
 decision := {

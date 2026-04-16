@@ -149,8 +149,20 @@ valid_department_access if {
     input.subject.fhir_context.department != ""
 }
 
+# Sensitive-patient lookup is STRICTLY per-tenant.
+#
+# data.json is keyed by tenant_id:
+#
+#   data["hospital-a"].sensitive_patients = ["123", "999"]
+#   data["hospital-b"].sensitive_patients = ["555", "777"]
+#
+# By indexing with input.subject.tenant_id (which the proxy sets from
+# the verified `iss` claim via the tenant registry), hospital-a's list
+# is unreachable when a hospital-b subject is being evaluated and vice
+# versa. A cross-tenant token cannot leak the other tenant's list
+# because the tenant_id itself is signed-proof via JWT verification.
 is_sensitive_patient if {
-    input.resource.patient_id in data.sensitive_patients
+    input.resource.patient_id in data[input.subject.tenant_id].sensitive_patients
 }
 
 # -----------------------------------------------------------
