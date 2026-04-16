@@ -11,6 +11,12 @@ services:
       KC_HOSTNAME_URL: http://localhost:8180
     ports:
       - "8180:8180"
+    # --import-realm picks up EVERY *.json file mounted under the import
+    # directory, which is how we get BOTH realms (hospital-a via
+    # realm-export.json AND hospital-b via realm-export-b.json) loaded at
+    # startup. Each realm is fully isolated: separate JWKS, separate users
+    # (nurse1/doctor1/admin1 vs. nurse-b1/doctor-b1/admin-b1), separate
+    # audiences, and therefore distinct signed tokens.
     command: ["start-dev", "--http-port=8180", "--import-realm"]
     volumes:
       - ../keycloak:/opt/keycloak/data/import:ro

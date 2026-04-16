@@ -1,3 +1,8 @@
 {
-  "sensitive_patients": ["123", "999"]
+  "hospital-a": {
+    "sensitive_patients": ["123", "999"]
+  },
+  "hospital-b": {
+    "sensitive_patients": ["555", "777"]
+  }
 }

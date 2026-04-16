@@ -103,12 +103,87 @@ redacted paths, and break-glass detail.
 
 ## Multi-tenant isolation
 
+The proxy runs as a single process but serves multiple hospitals (or
+any set of independent OIDC realms) with strict cryptographic isolation
+between them. The reference deployment carries two tenants end-to-end:
+`hospital-a` and `hospital-b`.
+
+### Identity boundary — verified `iss` claim is the only routing key
+
 - Each tenant is identified by `issuer_url` in `configs/tenants.yaml`.
-- JWKS caches, policy bundles, and OPA data files are scoped per
-  tenant. A request is routed to its tenant only via the verified
-  `iss` claim — there is no URL-based tenant selection, preventing
-  cross-tenant impersonation.
-- The registry rejects duplicate tenant ids/issuers at load time.
+  The registry is keyed by issuer URL and rejects duplicate
+  tenant ids/issuers at load time.
+- A request is routed to a tenant ONLY via the cryptographically
+  verified `iss` claim on the bearer JWT. There is no URL-based or
+  header-based tenant selection — a client cannot "claim" a different
+  tenant by setting `X-Tenant-Id` or targeting a different path.
+- A token whose `iss` claim is absent from the registry is rejected
+  with HTTP 401 `untrusted issuer` before any JWKS fetch, downstream
+  handler, or OPA call runs.
+- JWKS caches are per-tenant. The signing key for hospital-a is never
+  used to verify a token that claims to come from hospital-b, even if
+  both tenants are loaded in the same process.
+
+### Keycloak — two realms, one container
+
+`deployments/keycloak/` ships two realm exports:
+
+- `realm-export.json`     → realm `hospital-a` with users
+  `nurse1`, `doctor1`, `admin1` and client `fhir-privacy-proxy`.
+- `realm-export-b.json`   → realm `hospital-b` with users
+  `nurse-b1`, `doctor-b1`, `admin-b1` and client `fhir-privacy-proxy-b`.
+
+Both files are mounted into the Keycloak container's
+`/opt/keycloak/data/import` directory and loaded via `--import-realm`
+at startup, giving each tenant its own realm, users, roles, signing
+keys, and audience. Tokens from one realm are unusable against the
+other.
+
+### Policy data — per-tenant `data.json`
+
+`policies/data.json` is structured as a map keyed by `tenant_id`:
+
+```json
+{
+  "hospital-a": { "sensitive_patients": ["123", "999"] },
+  "hospital-b": { "sensitive_patients": ["555", "777"] }
+}
+```
+
+`policies/base/authz.rego` indexes into this map using the verified
+tenant id on the subject:
+
+```rego
+is_sensitive_patient if {
+    input.resource.patient_id in data[input.subject.tenant_id].sensitive_patients
+}
+```
+
+Because `input.subject.tenant_id` comes from the signed JWT (resolved
+by the registry, not provided by the caller), a hospital-a subject
+cannot see hospital-b's sensitive list — the Rego expression literally
+cannot reach `data["hospital-b"]` when the subject's verified tenant
+is `hospital-a`. The lists are disjoint in the shipped data so that
+regressions are caught: hospital-a's `123` and `999` must not appear
+in hospital-b's list, and vice versa.
+
+### Proof
+
+`cmd/proxy/tenant_isolation_test.go` is the standing proof of this
+isolation claim. It stands up two mock JWKS servers (one per tenant)
+and exercises the real auth middleware + OPA input path to verify:
+
+1. A token whose issuer isn't registered is rejected with 401
+   `untrusted issuer`.
+2. `SubjectContext.TenantID` is derived from the verified `iss`
+   claim — client-supplied `X-Tenant-Id` / `X-Forwarded-Tenant`
+   headers are ignored.
+3. A token whose `iss` points at hospital-b but is signed with
+   hospital-a's key fails signature verification (cross-issuer
+   forgery).
+4. `policies/data.json` per-tenant sensitive lists are disjoint and
+   the `data[input.subject.tenant_id].sensitive_patients` indexing
+   keeps each tenant's list unreachable from the other.
 
 ## Data flow for a single request
 
