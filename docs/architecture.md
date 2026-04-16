@@ -76,8 +76,52 @@ Rule engine. Reads `input.subject`, `input.request`, `input.resource`,
 - `risk_mask_threshold = 0.6`  → widen mask list
 - `risk_deny_threshold = 0.85` → deny unless break-glass
 
-Versioned bundles live under `policies/versions/` and are managed by
-`internal/policyversion` (rollback supported).
+### Versioned policies & rollback
+
+Every policy bundle lives under `policies/versions/<version>/authz.rego`.
+The reference stack ships three versions:
+
+- `v1` — static RBAC (pre-risk-scoring baseline; kept for rollback).
+- `v2` — risk-aware (current default; adaptive mask + deny thresholds).
+- `v3` — v2 with stricter nurse redaction (adds `birthDate` to the
+  baseline mask list, aligning the nurse-scope view with HIPAA Safe
+  Harbor quasi-identifier handling).
+
+`internal/policyversion.Manager` owns the set of bundles and the
+"active" pointer. `internal/policy.OPAAdmin` talks to OPA's management
+API (`PUT/DELETE /v1/policies/{id}`). The manager wires these together
+so `Activate("vN")` and `Rollback()` both:
+
+1. Read `policies/versions/<target>/authz.rego` from disk.
+2. `PUT /v1/policies/authz` with that body.
+3. Only after a 2xx from OPA, update the in-memory active pointer
+   and history stack.
+
+If step 2 fails the in-memory pointer is *not* advanced, so
+`Manager.Active()` always matches the bundle OPA is actually serving —
+critical for incident response ("what policy is running right now?")
+and for idempotent retries. The `authz` OPA policy id is fixed per
+manager instance, so every Activate/Rollback replaces the same module
+and OPA's decision endpoint (`/v1/data/authz/decision`) immediately
+reflects the new rules.
+
+**Rollback workflow** (e.g. v3 causes legitimate traffic to be masked
+too aggressively):
+
+```
+# Operator notices elevated fhir_proxy_policy_outcome_total{outcome="deny"}
+# after a v3 rollout and wants to revert.
+#
+# From a controller / ops shim that owns the Manager:
+manager.Rollback()       // → returns "v2", uploads v2/authz.rego to OPA
+# If OPA is transiently unavailable, Rollback returns an error and the
+# history stack is preserved — retrying after OPA recovers will
+# successfully roll back without re-running any upstream bookkeeping.
+```
+
+The same flow is exercised in `internal/policyversion/manager_opa_test.go`
+with an `httptest`-backed mock OPA — see `TestRollback_UploadsPreviousVersion`
+and `TestRollback_PreservesHistoryOnOPAFailure`.
 
 ### FastAPI ML service (`ml/risk_service.py`)
 Stateless HTTP service exposing:

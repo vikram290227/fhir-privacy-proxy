@@ -61,6 +61,7 @@ curl http://localhost:8080/health
 | `GET /metrics` | Prometheus metrics |
 | `POST /webhook/revoke` | Keycloak token revocation webhook |
 | `GET /fhir/r4/*` | Protected FHIR proxy (requires JWT) |
+| `* /admin/v1/*` | Management API (gated by `X-Admin-Key`, see [Admin API](#admin-api)) |
 
 ## Configuration
 
@@ -71,6 +72,8 @@ curl http://localhost:8080/health
 | `FHIR_UPSTREAM` | `http://localhost:8090/fhir` | Upstream FHIR server |
 | `REDIS_ADDR` | (disabled) | Redis address for token revocation **and** rate limiting |
 | `RISK_SERVICE_URL` | (disabled) | FastAPI risk-scoring service URL |
+| `ADMIN_API_KEY` | (disabled) | Static API key for `/admin/v1/*` (omit to leave the surface entirely off the wire) |
+| `POLICIES_DIR` | `policies` | Root for `versions/<v>/authz.rego` bundles consumed by the policy version manager |
 
 ### Rate limiting
 
@@ -118,6 +121,44 @@ not break the proxy. Downstream OPA + ML still run.
 from a single token and reports how many were rate-limited vs. denied
 vs. allowed, plus a snapshot of the counter — a quick way to visually
 confirm the backstop is doing its job.
+
+## Admin API
+
+A small management plane is mounted at `/admin/v1` whenever
+`ADMIN_API_KEY` is set. Every endpoint requires the key in an
+`X-Admin-Key` header (constant-time comparison). A 401 is returned for
+a missing or wrong key, and a 503 with `{"error":"feature_disabled"}`
+when the underlying dependency (Redis, file audit sink, policy
+manager) is not configured — so operators can tell "broken" apart from
+"not wired up". Lock the surface down behind a separate ingress rule
+from the public `/fhir/r4/*` path.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET`  | `/admin/v1/policy/versions` | List discovered bundles + the active version |
+| `POST` | `/admin/v1/policy/activate` | Body `{"version":"vN"}` — uploads `versions/vN/authz.rego` to OPA, then flips the active pointer |
+| `POST` | `/admin/v1/policy/rollback` | Pops one history entry, uploads it to OPA, returns `{previous, active}` |
+| `GET`  | `/admin/v1/tenants` | List tenants. Sensitive lists are summarised (`sensitive_patients_count`) — never returned in full |
+| `GET`  | `/admin/v1/audit/tail?n=50` | Last `n` lines of the on-disk audit log (file sink only; capped at 1000) |
+| `POST` | `/admin/v1/tokens/revoke` | Body `{"tenant":"hospital-a","jti":"...","exp":1735689600}` — pushes into the Redis revocation cache |
+| `GET`  | `/admin/v1/health/deps` | Concurrent fan-out probe of OPA, Redis, upstream FHIR, risk service. Returns 200 when all configured deps pass, 503 if any fails. Disabled deps report `"status":"disabled"` and don't cause a failure |
+
+Every admin call increments
+`fhir_proxy_admin_requests_total{endpoint,status}`, where `endpoint`
+is the chi route pattern (`/audit/tail`, never the raw path with the
+`?n=` query string) so label cardinality stays bounded.
+
+A curl wrapper lives at `scripts/admin.sh`:
+
+```bash
+ADMIN_API_KEY=secret ./scripts/admin.sh versions
+ADMIN_API_KEY=secret ./scripts/admin.sh activate v3
+ADMIN_API_KEY=secret ./scripts/admin.sh rollback
+ADMIN_API_KEY=secret ./scripts/admin.sh tenants
+ADMIN_API_KEY=secret ./scripts/admin.sh audit-tail 100
+ADMIN_API_KEY=secret ./scripts/admin.sh revoke hospital-a abc-123 1735689600
+ADMIN_API_KEY=secret ./scripts/admin.sh health
+```
 
 ## Test Users (Keycloak)
 
