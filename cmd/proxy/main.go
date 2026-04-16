@@ -20,6 +20,7 @@ import (
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/ratelimit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/risk"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tracing"
@@ -76,6 +77,27 @@ func main() {
 		cancel()
 	} else {
 		logger.Info("REDIS_ADDR not set, token revocation disabled")
+	}
+
+	// Initialize sliding-window rate limiter (optional, same Redis).
+	// Gated on REDIS_ADDR so the dev-loop without Redis keeps working;
+	// when enabled it is the backstop for bulk-extraction abuse that
+	// the ML risk scorer alone can't stop (large volume, low novelty).
+	var rateLimiter *ratelimit.Limiter
+	if redisAddr != "" {
+		rl := ratelimit.New(redisAddr, logger)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := rl.Ping(ctx); err != nil {
+			logger.Warn("redis unavailable, rate limiting disabled", zap.Error(err))
+			_ = rl.Close()
+		} else {
+			logger.Info("redis connected, rate limiting enabled", zap.String("addr", redisAddr))
+			rateLimiter = rl
+			authMiddleware.SetRateLimiter(rateLimiter)
+		}
+		cancel()
+	} else {
+		logger.Info("REDIS_ADDR not set, rate limiting disabled")
 	}
 
 	// Initialize audit logger. The proxy prefers a persistent local
@@ -148,6 +170,12 @@ func main() {
 	r.Route("/fhir/r4", func(r chi.Router) {
 		r.Use(authMiddleware.ValidateToken)
 		r.Use(authMiddleware.RequireSmartScope)
+		// RateLimit runs AFTER ValidateToken/RequireSmartScope (needs
+		// subject_id + tenant_id from the token) and BEFORE ScoreRisk
+		// so we don't spend risk-service round trips on requests that
+		// are about to be rejected with 429. No-op when REDIS_ADDR is
+		// unset — the ML layer remains the backstop in that case.
+		r.Use(authMiddleware.RateLimit)
 		r.Use(authMiddleware.ScoreRisk(riskClient))
 		r.Use(authMiddleware.EnforcePolicy(opaClient))
 

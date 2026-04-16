@@ -121,6 +121,19 @@ var (
 			Buckets: prometheus.DefBuckets,
 		},
 	)
+
+	// RateLimitHits counts 429 outcomes from the sliding-window rate
+	// limiter. The `window` label is "minute" or "hour" so operators
+	// can see which tier is being hit. Subject IDs are included to
+	// aid incident response but are inherently high-cardinality — in
+	// production you may want to redact or hash them.
+	RateLimitHits = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_rate_limit_hits_total",
+			Help: "Total rate-limit rejections (429) by tenant + subject + window",
+		},
+		[]string{"tenant", "subject", "window"},
+	)
 )
 
 func init() {
@@ -137,6 +150,7 @@ func init() {
 		PolicyOutcome,
 		RiskScores,
 		RiskScoreDuration,
+		RateLimitHits,
 	)
 }
 

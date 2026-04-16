@@ -30,7 +30,23 @@ type Config struct {
 	// require break-glass / admin to access. Loaded in-process and
 	// passed to OPA via the request input.
 	SensitivePatients []string `yaml:"sensitive_patients"`
+	// RequestsPerMinute / RequestsPerHour are the sliding-window rate
+	// limits applied per (tenant_id, subject_id). Both are backstops
+	// against bulk-extraction attacks — the minute tier catches fast
+	// scripted scans, the hour tier catches slow-and-low exfiltration.
+	// A zero or negative value falls back to the package defaults
+	// (60/min, 1000/hr). The limits are only enforced when a Redis
+	// instance is wired into the proxy (REDIS_ADDR set and reachable).
+	RequestsPerMinute int `yaml:"requests_per_minute"`
+	RequestsPerHour   int `yaml:"requests_per_hour"`
 }
+
+// DefaultRequestsPerMinute / DefaultRequestsPerHour are the fall-back
+// rate limits used when a tenant does not set its own in tenants.yaml.
+const (
+	DefaultRequestsPerMinute = 60
+	DefaultRequestsPerHour   = 1000
+)
 
 // Registry holds all tenants keyed by issuer URL and by tenant_id for
 // fast isolated lookup.
@@ -65,6 +81,12 @@ func LoadRegistry(configPath string) (*Registry, error) {
 		}
 		if t.PolicyVersion == "" {
 			t.PolicyVersion = "v1"
+		}
+		if t.RequestsPerMinute <= 0 {
+			t.RequestsPerMinute = DefaultRequestsPerMinute
+		}
+		if t.RequestsPerHour <= 0 {
+			t.RequestsPerHour = DefaultRequestsPerHour
 		}
 		if t.IssuerURL == "" || t.TenantID == "" {
 			return nil, fmt.Errorf("tenant %d: issuer_url and tenant_id required", i)
