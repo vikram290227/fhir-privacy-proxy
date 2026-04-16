@@ -20,11 +20,14 @@ Environment:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import joblib
@@ -57,6 +60,7 @@ MODEL_POLL_SECS = float(os.environ.get("MODEL_POLL_SECS", "30"))
 app = FastAPI(title="FHIR Privacy Risk Scoring", version="1.0.0")
 _model = None
 _shap_explainer = None
+_shap_healthy: bool = False
 _model_lock = threading.RLock()
 _model_mtime: float = 0.0
 
@@ -123,6 +127,64 @@ class FeedbackRequest(BaseModel):
     reviewer: str
 
 
+_SHAP_PROBE_ROW = {
+    "hour": 10,
+    "day_of_week": 2,
+    "break_glass": 0,
+    "patient_sensitive": 0,
+    "department_match": 1,
+    "role": "nurse",
+    "action": "read",
+    "resource_type": "Patient",
+}
+
+
+def _build_shap_explainer(pipeline):
+    """Construct a TreeExplainer for the iforest stage and run it once
+    against a synthetic row to verify the full pipeline works.
+
+    Returns `(explainer, healthy)`. Any failure is logged with the
+    exception type so operators can see exactly why SHAP was disabled
+    (sklearn version skew, missing optional numpy ABI, model-shape
+    mismatch, etc.) rather than silently degrading to heuristics.
+    """
+    if not _HAS_SHAP:
+        logger.info("shap not installed; falling back to heuristic explanations")
+        return None, False
+    try:
+        iforest = pipeline.named_steps["iforest"]
+        explainer = shap.TreeExplainer(iforest)
+    except Exception as e:
+        logger.warning(
+            "shap explainer construction failed (%s: %s); "
+            "falling back to heuristic explanations",
+            type(e).__name__, e,
+        )
+        return None, False
+
+    try:
+        probe = pd.DataFrame([_SHAP_PROBE_ROW])
+        transformed = pipeline.named_steps["prep"].transform(probe)
+        values = explainer.shap_values(transformed)
+        attr = np.array(values).flatten()
+        if attr.size == 0:
+            logger.warning(
+                "shap probe returned an empty attribution vector; "
+                "falling back to heuristic explanations",
+            )
+            return None, False
+    except Exception as e:
+        logger.warning(
+            "shap probe failed (%s: %s); "
+            "falling back to heuristic explanations",
+            type(e).__name__, e,
+        )
+        return None, False
+
+    logger.info("shap probe succeeded; SHAP explanations enabled")
+    return explainer, True
+
+
 def _load_model():
     """Return the live pipeline, loading-or-reloading from disk if the
     joblib mtime has advanced since we last looked.
@@ -134,29 +196,32 @@ def _load_model():
     _model_lock so a concurrent background reload can't hand a
     partially-initialised model to a request.
     """
-    global _model, _shap_explainer, _model_mtime
+    global _model, _shap_explainer, _shap_healthy, _model_mtime
     try:
         mtime = os.path.getmtime(MODEL_PATH)
     except OSError:
-        return _model  # no file yet — whatever we already have (or None)
+        # File absent on cold boot is expected; don't log per poll.
+        return _model
 
     with _model_lock:
         if _model is not None and mtime == _model_mtime:
             return _model
         try:
             pipeline = joblib.load(MODEL_PATH)
-        except Exception:  # pragma: no cover - filesystem race
+        except Exception as e:
+            logger.error(
+                "failed to load model from %s (%s: %s); keeping previous model",
+                MODEL_PATH, type(e).__name__, e,
+            )
             return _model
         _model = pipeline
         _model_mtime = mtime
-        _shap_explainer = None
-        if _HAS_SHAP:
-            try:
-                iforest = _model.named_steps["iforest"]
-                _shap_explainer = shap.TreeExplainer(iforest)
-            except Exception:
-                _shap_explainer = None
+        _shap_explainer, _shap_healthy = _build_shap_explainer(pipeline)
         _refresh_metrics_from_model()
+        logger.info(
+            "loaded model from %s (shap_healthy=%s)",
+            MODEL_PATH, _shap_healthy,
+        )
     return _model
 
 
@@ -273,7 +338,8 @@ def health() -> dict[str, str]:
     return {
         "status": "ok",
         "model_loaded": str(_load_model() is not None),
-        "shap": str(_HAS_SHAP),
+        "shap_installed": str(_HAS_SHAP),
+        "shap_healthy": str(_shap_healthy),
     }
 
 
@@ -301,14 +367,19 @@ def score(req: ScoreRequest) -> ScoreResponse:
         raw = float(model.named_steps["iforest"].decision_function(
             model.named_steps["prep"].transform(x)
         )[0])
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "score: IsolationForest.decision_function raised %s: %s; "
+            "returning neutral response",
+            type(e).__name__, e,
+        )
         return ScoreResponse(score=0.0, label="normal", explanation={})
 
     score_val = _normalize(raw)
     label = _label_for(score_val)
 
     explanation: dict[str, float] = {}
-    if _shap_explainer is not None:
+    if _shap_healthy and _shap_explainer is not None:
         try:
             transformed = model.named_steps["prep"].transform(x)
             shap_values = _shap_explainer.shap_values(transformed)
@@ -318,7 +389,12 @@ def score(req: ScoreRequest) -> ScoreResponse:
             order = np.argsort(-np.abs(attr))[:5]
             for idx in order:
                 explanation[feature_names[idx]] = round(float(attr[idx]), 4)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "score: SHAP explanation raised %s: %s; "
+                "falling back to heuristic explanation",
+                type(e).__name__, e,
+            )
             explanation = {}
 
     # Heuristic fallback explanations keep the API useful even without SHAP.
