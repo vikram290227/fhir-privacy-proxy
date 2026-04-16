@@ -31,8 +31,10 @@ The Go proxy invokes the service **before** OPA, attaches the returned
 | `schema.py` | Access-log schema + feature columns shared with the Go client |
 | `generate_dataset.py` | Synthetic healthcare access-log generator |
 | `train_isolation_forest.py` | Trains the IsolationForest pipeline + saves joblib |
-| `risk_service.py` | FastAPI service exposing `/score`, `/feedback`, `/health` |
+| `risk_service.py` | FastAPI service exposing `/score`, `/feedback`, `/health`, `/metrics` |
+| `retrain_nightly.py` | Nightly retraining job — merges feedback NDJSON back into the training set and atomically replaces the joblib |
 | `feedback_loop.md` | Design for the supervised retraining loop |
+| `tests/test_retrain.py` | Pytest coverage for `retrain_nightly.py` |
 | `requirements.txt` | Python dependencies |
 
 ## Quick start
@@ -91,3 +93,107 @@ export RISK_SERVICE_URL=http://localhost:8000
 | `>= 0.85` | `anomalous` | deny (unless break-glass) |
 
 Thresholds live in `policies/base/authz.rego` and can be tuned per tenant.
+
+## Feedback + nightly retraining
+
+The detector only stays useful if it learns from reviewer decisions.
+See `feedback_loop.md` for the full design; the short version:
+
+1. The proxy calls `/score` on every authorized request. The returned
+   label lands in the audit log.
+2. A reviewer POSTs a verdict to `/feedback` for any decision they
+   want to reinforce or correct. The service appends the record to
+   `ml/data/feedback.ndjson`.
+3. `ml/retrain_nightly.py` merges the NDJSON back into the training
+   set on a cron / scheduled-action, atomically replaces
+   `ml/models/iforest.joblib`, and writes a sidecar
+   `iforest.joblib.meta.json` with `{training_rows, feedback_rows,
+   anomaly_rate, last_trained_ts}`.
+4. `risk_service.py` watches the joblib mtime (30s poll by default,
+   override with `MODEL_POLL_SECS`) and hot-reloads the pipeline in
+   place — no uvicorn restart needed. On reload it re-reads the
+   sidecar and publishes the gauges on `/metrics`.
+
+### Retraining on demand
+
+```bash
+python ml/retrain_nightly.py \
+    --input ml/data/access_logs.csv \
+    --feedback ml/data/feedback.ndjson \
+    --model ml/models/iforest.joblib
+```
+
+Sample output:
+
+```
+rows trained:       20003
+feedback ingested:  1
+anomaly rate:       0.0208
+model path:         ml/models/iforest.joblib
+last trained (unix): 1729180800
+```
+
+### Feedback rows
+
+Each NDJSON line is what the FastAPI service writes from
+`POST /feedback`:
+
+```json
+{
+  "user_id": "nurse7",
+  "role": "nurse",
+  "resource_type": "Observation",
+  "action": "write",
+  "hour": 2,
+  "day_of_week": 6,
+  "department_match": false,
+  "break_glass": false,
+  "patient_sensitive": true,
+  "was_legitimate": false,
+  "reviewer": "secops@example.com",
+  "timestamp": "2025-11-14T02:07:08.812Z"
+}
+```
+
+- `was_legitimate: true` — model flagged but reviewer approved. The
+  row is injected into training **unchanged** so the detector sees
+  this vector as an inlier on the next fit.
+- `was_legitimate: false` — model allowed but was actually anomalous.
+  The row is injected **3×** with Gaussian noise on `hour` /
+  `day_of_week` (clamped to legal ranges) so the decision boundary
+  bends toward reviewer intent without overfitting a single point.
+
+A single corrupt NDJSON line is logged and skipped, not fatal — the
+retrain is designed to be safe to run unattended on a cron.
+
+### Scheduled job
+
+`.github/workflows/retrain.yml` is a scaffold that runs
+`retrain_nightly.py` at 02:00 UTC daily (also via
+`workflow_dispatch`). It seeds a synthetic training set if none is
+checked in and publishes the resulting joblib as a build artifact.
+Before production use, replace the synthetic-seeding step with a pull
+from your durable store (S3 / Azure Blob / GCS) and add an equivalent
+push on the way out.
+
+### Metrics
+
+`GET /metrics` exposes Prometheus gauges that operators can alert on:
+
+| Gauge | Meaning |
+|---|---|
+| `risk_model_training_rows` | Rows used for the last fit (incl. feedback injections) |
+| `risk_model_anomaly_rate` | Share of training rows scored ≥ 0.6 (`suspicious` threshold) |
+| `risk_model_feedback_rows` | Feedback NDJSON records ingested last run |
+| `risk_model_last_trained_ts` | Unix timestamp of the last successful retrain |
+
+### Tests
+
+```bash
+pip install -r ml/requirements.txt pytest
+pytest ml/tests/
+```
+
+The tests synthesise a tiny CSV + NDJSON, run a full retrain cycle,
+and verify the resulting joblib predicts on fresh vectors — which is
+the invariant the service depends on across a model swap.

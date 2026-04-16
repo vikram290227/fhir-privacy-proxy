@@ -6,19 +6,23 @@ startup, exposes:
     POST /score       -> returns {score, label, explanation}
     POST /feedback    -> records supervised feedback for retraining
     GET  /health      -> liveness probe
+    GET  /metrics     -> Prometheus gauges describing the live model
 
 Start locally:
     uvicorn ml.risk_service:app --host 0.0.0.0 --port 8000 --reload
 
 Environment:
-    MODEL_PATH  = ml/models/iforest.joblib   (default)
-    FEEDBACK_LOG = ml/data/feedback.ndjson   (append-only NDJSON log)
+    MODEL_PATH       = ml/models/iforest.joblib   (default)
+    FEEDBACK_LOG     = ml/data/feedback.ndjson    (append-only NDJSON log)
+    MODEL_POLL_SECS  = 30                         (hot-reload poll interval)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -26,7 +30,13 @@ try:
     import joblib
     import numpy as np
     import pandas as pd
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Response
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        CollectorRegistry,
+        Gauge,
+        generate_latest,
+    )
     from pydantic import BaseModel, Field
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
@@ -42,10 +52,41 @@ except ImportError:  # pragma: no cover
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "ml/models/iforest.joblib")
 FEEDBACK_LOG = os.environ.get("FEEDBACK_LOG", "ml/data/feedback.ndjson")
+MODEL_POLL_SECS = float(os.environ.get("MODEL_POLL_SECS", "30"))
 
 app = FastAPI(title="FHIR Privacy Risk Scoring", version="1.0.0")
 _model = None
 _shap_explainer = None
+_model_lock = threading.RLock()
+_model_mtime: float = 0.0
+
+# A private registry keeps the service's metrics isolated from the
+# process-wide default registry used by third-party libraries, so
+# `/metrics` emits only the risk-model gauges described in
+# feedback_loop.md. The gauges are driven by retrain_nightly.py
+# (training_rows, anomaly_rate, feedback_rows, last_trained_ts) and
+# updated from the model's own metadata block when it is loaded.
+_REGISTRY = CollectorRegistry()
+TRAINING_ROWS_GAUGE = Gauge(
+    "risk_model_training_rows",
+    "Total rows used for the last successful fit (incl. feedback injections)",
+    registry=_REGISTRY,
+)
+ANOMALY_RATE_GAUGE = Gauge(
+    "risk_model_anomaly_rate",
+    "Proportion of training rows scored at or above the 'suspicious' threshold (0.6)",
+    registry=_REGISTRY,
+)
+FEEDBACK_ROWS_GAUGE = Gauge(
+    "risk_model_feedback_rows",
+    "Number of reviewer feedback events ingested by the last retrain run",
+    registry=_REGISTRY,
+)
+LAST_TRAINED_GAUGE = Gauge(
+    "risk_model_last_trained_ts",
+    "Unix timestamp of the last successful retrain",
+    registry=_REGISTRY,
+)
 
 
 class ScoreRequest(BaseModel):
@@ -83,21 +124,111 @@ class FeedbackRequest(BaseModel):
 
 
 def _load_model():
-    global _model, _shap_explainer
-    if _model is None:
-        if not os.path.exists(MODEL_PATH):
-            # Allow the service to boot without a trained model —
-            # /score will return neutral responses so the proxy never
-            # fails closed during development.
-            return None
-        _model = joblib.load(MODEL_PATH)
+    """Return the live pipeline, loading-or-reloading from disk if the
+    joblib mtime has advanced since we last looked.
+
+    First call: fault-in from disk (or return None if no model has
+    been trained yet — keeps the service able to boot during local
+    dev). Subsequent calls: re-read only when mtime has changed, so
+    /score stays on the hot path. All reads are guarded by
+    _model_lock so a concurrent background reload can't hand a
+    partially-initialised model to a request.
+    """
+    global _model, _shap_explainer, _model_mtime
+    try:
+        mtime = os.path.getmtime(MODEL_PATH)
+    except OSError:
+        return _model  # no file yet — whatever we already have (or None)
+
+    with _model_lock:
+        if _model is not None and mtime == _model_mtime:
+            return _model
+        try:
+            pipeline = joblib.load(MODEL_PATH)
+        except Exception:  # pragma: no cover - filesystem race
+            return _model
+        _model = pipeline
+        _model_mtime = mtime
+        _shap_explainer = None
         if _HAS_SHAP:
             try:
                 iforest = _model.named_steps["iforest"]
                 _shap_explainer = shap.TreeExplainer(iforest)
             except Exception:
                 _shap_explainer = None
+        _refresh_metrics_from_model()
     return _model
+
+
+def _refresh_metrics_from_model() -> None:
+    """Pull the retrainer's sidecar summary (if present) into Prometheus.
+
+    retrain_nightly.py writes `<model>.meta.json` next to the active
+    joblib so the FastAPI service can reflect training_rows /
+    anomaly_rate / feedback_rows without recomputing them. If the
+    sidecar is missing we only update the last_trained timestamp from
+    the joblib mtime so the "last seen a model" signal is still
+    accurate.
+    """
+    meta_path = MODEL_PATH + ".meta.json"
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+
+    if "training_rows" in meta:
+        TRAINING_ROWS_GAUGE.set(float(meta["training_rows"]))
+    if "anomaly_rate" in meta:
+        ANOMALY_RATE_GAUGE.set(float(meta["anomaly_rate"]))
+    if "feedback_rows" in meta:
+        FEEDBACK_ROWS_GAUGE.set(float(meta["feedback_rows"]))
+    if "last_trained_ts" in meta:
+        LAST_TRAINED_GAUGE.set(float(meta["last_trained_ts"]))
+    else:
+        LAST_TRAINED_GAUGE.set(_model_mtime)
+
+
+# ---------------------------------------------------------------------
+# Hot-reload watcher
+# ---------------------------------------------------------------------
+
+_watcher_started = False
+_watcher_lock = threading.Lock()
+
+
+def _watch_model_file(poll_secs: float) -> None:
+    """Background loop that triggers _load_model() on an interval.
+
+    The reloader itself is the single source of truth for the mtime
+    check, so this thread just pokes it. Using a thread instead of
+    inotify keeps the code portable (macOS dev, Linux prod, CI
+    containers) with a small constant cost of one filesystem stat
+    every poll_secs.
+    """
+    while True:
+        try:
+            _load_model()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        time.sleep(poll_secs)
+
+
+def _ensure_watcher_started() -> None:
+    global _watcher_started
+    if _watcher_started or MODEL_POLL_SECS <= 0:
+        return
+    with _watcher_lock:
+        if _watcher_started:
+            return
+        t = threading.Thread(
+            target=_watch_model_file,
+            args=(MODEL_POLL_SECS,),
+            name="risk-model-watcher",
+            daemon=True,
+        )
+        t.start()
+        _watcher_started = True
 
 
 def _normalize(raw: float) -> float:
@@ -131,6 +262,12 @@ def _row_from_request(req: ScoreRequest) -> pd.DataFrame:
     )
 
 
+@app.on_event("startup")
+def _startup() -> None:  # pragma: no cover - exercised by uvicorn
+    _load_model()
+    _ensure_watcher_started()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -138,6 +275,19 @@ def health() -> dict[str, str]:
         "model_loaded": str(_load_model() is not None),
         "shap": str(_HAS_SHAP),
     }
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus scrape endpoint.
+
+    Always re-checks the joblib mtime before rendering — this means a
+    freshly-retrained model is reflected in `risk_model_*` gauges the
+    first time Prometheus scrapes us after the atomic rename, without
+    waiting for the 30s background poll.
+    """
+    _load_model()
+    return Response(generate_latest(_REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/score", response_model=ScoreResponse)
