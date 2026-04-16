@@ -25,11 +25,12 @@ type RevocationChecker interface {
 }
 
 type Middleware struct {
-	tenantRegistry     *tenant.Registry
-	jwksCache          map[string]*keyfunc.JWKS
-	jwksMu             sync.Mutex
-	logger             *zap.Logger
-	revocationChecker  RevocationChecker
+	tenantRegistry    *tenant.Registry
+	jwksCache         map[string]*keyfunc.JWKS
+	jwksMu            sync.Mutex
+	logger            *zap.Logger
+	revocationChecker RevocationChecker
+	rateLimiter       RateLimiter
 }
 
 func NewMiddleware(tenantRegistry *tenant.Registry, logger *zap.Logger) *Middleware {

@@ -135,20 +135,41 @@ dim "HTTP ${code}"
 # Phase 2 — bulk extraction
 # -----------------------------------------------------------
 title "Phase 2: bulk extraction (${BULK_COUNT} reads back-to-back)"
-warn "current proxy has no rate-limit — the AI layer is the backstop"
-allowed=0 denied=0
+dim "rate limiter is the first backstop; ML risk scoring is the second"
+allowed=0 denied=0 rate_limited=0
 start=$(date +%s)
 for i in $(seq 1 "$BULK_COUNT"); do
     code=$(patient_request "$NURSE_TOKEN" "$BASE_ID")
-    if [ "$code" = "200" ]; then
-        allowed=$((allowed+1))
-    else
-        denied=$((denied+1))
-    fi
+    case "$code" in
+        200) allowed=$((allowed+1)) ;;
+        429) rate_limited=$((rate_limited+1)) ;;
+        *)   denied=$((denied+1)) ;;
+    esac
 done
 end=$(date +%s)
-dim "elapsed: $((end-start))s  allowed=${allowed}  denied=${denied}"
-dim "check /metrics → fhir_proxy_policy_outcome_total and fhir_proxy_risk_scores_total"
+dim "elapsed: $((end-start))s  allowed=${allowed}  denied=${denied}  rate_limited=${rate_limited}"
+
+# When REDIS_ADDR is set in docker-compose, the proxy enforces
+# requests_per_minute per (tenant,subject). A burst of BULK_COUNT from
+# one token should therefore start returning 429s once the minute budget
+# for nurse1 is exhausted. If rate_limited==0 the limiter is disabled
+# (Redis not wired) — flag it so the operator knows the AI layer is
+# carrying the whole load.
+if [ "$rate_limited" -gt 0 ]; then
+    ok "rate limiter fired ${rate_limited}x — bulk extraction backstopped before reaching ML"
+else
+    warn "no 429s — rate limiter not active (REDIS_ADDR unset?). ML is the only backstop."
+fi
+
+dim "check /metrics → fhir_proxy_rate_limit_hits_total, fhir_proxy_policy_outcome_total, fhir_proxy_risk_scores_total"
+
+# Pull the rate-limit counter directly so the operator sees the numeric
+# evidence without needing to grep /metrics manually.
+rl_metrics=$(curl -s "${PROXY_URL}/metrics" | grep '^fhir_proxy_rate_limit_hits_total' || true)
+if [ -n "$rl_metrics" ]; then
+    dim "rate-limit metrics snapshot:"
+    echo "$rl_metrics" | sed 's/^/      /'
+fi
 
 # -----------------------------------------------------------
 # Phase 3 — sensitive snooping

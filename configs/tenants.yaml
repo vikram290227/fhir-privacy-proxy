@@ -15,6 +15,12 @@ tenants:
     sensitive_patients:
       - "123"
       - "999"
+    # Rate limits (per tenant_id + subject_id, sliding window) — these
+    # are the backstop for bulk-extraction abuse when the ML risk
+    # scoring layer alone isn't enough. Enforced only when REDIS_ADDR
+    # is set. Zero / unset → fall back to package defaults (60 / 1000).
+    requests_per_minute: 60
+    requests_per_hour: 1000
 
   - issuer_url: "http://localhost:8180/realms/hospital-b"
     tenant_id: "hospital-b"
@@ -30,3 +36,7 @@ tenants:
     sensitive_patients:
       - "555"
       - "777"
+    # Hospital-B runs a tighter hour budget to demonstrate per-tenant
+    # tuning — this can be lifted by editing the file and reloading.
+    requests_per_minute: 60
+    requests_per_hour: 800

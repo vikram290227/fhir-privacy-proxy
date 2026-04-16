@@ -52,13 +52,18 @@ Owns the request pipeline. Middleware chain, in order:
 2. **RequireSmartScope** — maps the request's HTTP method + FHIR resource
    type to a required SMART scope (`patient/Patient.read`, etc.) and
    rejects requests whose token doesn't grant it.
-3. **ScoreRisk** — calls the Python FastAPI service, attaches the
+3. **RateLimit** — Redis-backed sliding-window limiter keyed by
+   `(tenant_id, subject_id)` with independent minute/hour tiers.
+   Returns 429 with `Retry-After` + `X-RateLimit-*` headers on breach.
+   No-op when `REDIS_ADDR` is unset. Runs before `ScoreRisk` so
+   rejected requests never incur the ML round-trip.
+4. **ScoreRisk** — calls the Python FastAPI service, attaches the
    returned score, label, and SHAP-style explanation to the subject
    context. Falls back to score=0 if the service is unreachable.
-4. **EnforcePolicy** — POSTs the full subject + request + resource
+5. **EnforcePolicy** — POSTs the full subject + request + resource
    context to OPA, receives an allow/deny + remove/mask lists, and
    records the decision in Prometheus.
-5. **fhirProxyHandler** — forwards the request to the upstream FHIR
+6. **fhirProxyHandler** — forwards the request to the upstream FHIR
    server, reads the JSON response, applies redactions (single
    resources and Bundles including nested bundles), then writes the
    response. An audit event is asynchronously appended to NDJSON.
@@ -98,6 +103,7 @@ redacted paths, and break-glass detail.
 - `fhir_proxy_policy_outcome_total{tenant,outcome,reason}`
 - `fhir_proxy_risk_scores_total{label}`
 - `fhir_proxy_risk_score_duration_seconds`
+- `fhir_proxy_rate_limit_hits_total{tenant,subject,window}`
 - `fhir_proxy_break_glass_total`
 - `fhir_proxy_auth_failures_total`
 
