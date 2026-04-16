@@ -14,12 +14,14 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/vikram290227/fhir-privacy-proxy/internal/admin"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/audit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/cache"
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/policyversion"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/ratelimit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/risk"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
@@ -102,8 +104,14 @@ func main() {
 
 	// Initialize audit logger. The proxy prefers a persistent local
 	// file (AUDIT_LOG_FILE) for dev/demo and falls back to Azure Blob
-	// Storage when AZURE_STORAGE_ACCOUNT is set.
-	var auditSink audit.Sink
+	// Storage when AZURE_STORAGE_ACCOUNT is set. We hold onto the
+	// concrete *audit.FileLogger so the admin /audit/tail endpoint can
+	// reach back to its on-disk path — the generic audit.Sink interface
+	// intentionally exposes no path accessor.
+	var (
+		auditSink     audit.Sink
+		auditFileSink *audit.FileLogger
+	)
 	if filePath := audit.FileLoggerPath(); filePath != "" {
 		fileLogger, fileErr := audit.NewFileLogger(filePath, logger)
 		if fileErr != nil {
@@ -112,6 +120,7 @@ func main() {
 			logger.Info("file audit logger enabled", zap.String("path", filePath))
 			defer fileLogger.Close()
 			auditSink = fileLogger
+			auditFileSink = fileLogger
 		}
 	} else if auditCfg := audit.ConfigFromEnv(); auditCfg != nil {
 		azureLogger, auditErr := audit.NewLogger(auditCfg, logger)
@@ -127,6 +136,28 @@ func main() {
 		}
 	} else {
 		logger.Info("AUDIT_LOG_FILE and AZURE_STORAGE_ACCOUNT not set, audit logging disabled")
+	}
+
+	// Initialize the policy version manager and wire it to OPA so
+	// /admin/v1/policy/{activate,rollback} can hot-swap the bundle OPA
+	// is running. POLICIES_DIR overrides the default "policies" root
+	// for tests / non-standard layouts.
+	policiesDir := os.Getenv("POLICIES_DIR")
+	if policiesDir == "" {
+		policiesDir = "policies"
+	}
+	policyMgr, err := policyversion.New(policiesDir)
+	if err != nil {
+		logger.Warn("policy version manager unavailable, /admin/v1/policy/* will return 503",
+			zap.String("dir", policiesDir),
+			zap.Error(err))
+		policyMgr = nil
+	} else {
+		opaAdmin := policy.NewOPAAdmin(opaURL, logger)
+		policyMgr.SetOPAAdmin(opaAdmin)
+		logger.Info("policy version manager loaded",
+			zap.String("dir", policiesDir),
+			zap.String("active", policyMgr.Active()))
 	}
 
 	// Setup router
@@ -154,17 +185,57 @@ func main() {
 		r.Post("/webhook/revoke", revocationCache.HandleWebhook)
 	}
 
-	// Upstream FHIR server
+	// Upstream FHIR base URL is needed by the router setup *and* by
+	// the admin /health/deps probe. Resolve it here so both can share
+	// the same value.
 	fhirUpstream := os.Getenv("FHIR_UPSTREAM")
 	if fhirUpstream == "" {
 		fhirUpstream = "http://localhost:8090/fhir"
 	}
 	fhirUpstream = strings.TrimRight(fhirUpstream, "/")
 
-	upstreamClient := &http.Client{Timeout: 30 * time.Second}
-
 	// Optional risk scoring client — enabled when RISK_SERVICE_URL is set.
-	riskClient := risk.NewClient(os.Getenv("RISK_SERVICE_URL"), logger)
+	riskServiceURL := os.Getenv("RISK_SERVICE_URL")
+	riskClient := risk.NewClient(riskServiceURL, logger)
+
+	// Mount the management API at /admin/v1 when ADMIN_API_KEY is set.
+	// All endpoints require the X-Admin-Key header to match the env
+	// var; an unset key keeps the surface entirely off the wire so
+	// operators don't have to tear down a route to disable it.
+	if adminKey := os.Getenv("ADMIN_API_KEY"); adminKey != "" {
+		var revoker admin.Revoker
+		if revocationCache != nil {
+			revoker = revocationCache
+		}
+		var redisHealth admin.HealthCheckable
+		if revocationCache != nil {
+			redisHealth = admin.NewRedisHealthCheck(revocationCache.Ping)
+		}
+		var auditTailer admin.AuditTailer
+		if auditFileSink != nil {
+			auditTailer = auditFileSink
+		}
+		var riskHealth admin.HealthCheckable
+		if riskClient.Enabled() {
+			riskHealth = admin.NewHTTPHealthCheck(riskServiceURL + "/health")
+		}
+		adminSrv := admin.New(adminKey, admin.Deps{
+			Policy:   admin.WrapPolicyManager(policyMgr),
+			Tenants:  tenantRegistry,
+			Audit:    auditTailer,
+			Revoker:  revoker,
+			OPA:      admin.NewHTTPHealthCheck(opaURL + "/health"),
+			Redis:    redisHealth,
+			Upstream: admin.NewHTTPHealthCheck(fhirUpstream + "/metadata"),
+			Risk:     riskHealth,
+		}, logger)
+		r.Mount("/admin/v1", adminSrv.Router())
+		logger.Info("admin API enabled at /admin/v1")
+	} else {
+		logger.Info("ADMIN_API_KEY not set, admin API disabled")
+	}
+
+	upstreamClient := &http.Client{Timeout: 30 * time.Second}
 
 	// Protected FHIR endpoints
 	r.Route("/fhir/r4", func(r chi.Router) {

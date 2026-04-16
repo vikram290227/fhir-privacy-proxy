@@ -134,6 +134,19 @@ var (
 		},
 		[]string{"tenant", "subject", "window"},
 	)
+
+	// AdminRequests counts requests to the /admin/v1 management API.
+	// Labelled by endpoint (the chi route pattern, NOT the raw path,
+	// so cardinality stays bounded) and HTTP status. Useful for
+	// alerting on a spike of 401s (probing) or 5xx (admin handler
+	// breakage).
+	AdminRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_admin_requests_total",
+			Help: "Total admin API requests by endpoint and HTTP status",
+		},
+		[]string{"endpoint", "status"},
+	)
 )
 
 func init() {
@@ -151,6 +164,7 @@ func init() {
 		RiskScores,
 		RiskScoreDuration,
 		RateLimitHits,
+		AdminRequests,
 	)
 }
 
