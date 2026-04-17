@@ -177,16 +177,22 @@ func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Co
 
 	roles := extractRoles(claims)
 
+	purpose := strings.ToUpper(strings.TrimSpace(r.Header.Get("X-Purpose-Of-Use")))
+	if purpose == "" {
+		purpose = "TREATMENT"
+	}
+
 	ctx := &SubjectContext{
-		SubjectID:   sub,
-		SubjectType: "practitioner",
-		Roles:       roles,
-		HasRoles:    len(roles) > 0,
-		FHIRContext: extractFHIRContext(claims),
-		Client:      extractClientInfo(claims),
-		Scopes:      extractScopes(claims),
-		Session:     extractSession(claims),
-		TenantID:    config.TenantID,
+		SubjectID:    sub,
+		SubjectType:  "practitioner",
+		Roles:        roles,
+		HasRoles:     len(roles) > 0,
+		FHIRContext:  extractFHIRContext(claims),
+		Client:       extractClientInfo(claims),
+		Scopes:       extractScopes(claims),
+		Session:      extractSession(claims),
+		TenantID:     config.TenantID,
+		PurposeOfUse: purpose,
 	}
 
 	bg, err := m.resolveBreakGlass(r, sub, roles)

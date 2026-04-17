@@ -132,11 +132,61 @@ query "nurse-bg" "$NURSE_TOKEN" "$EMERGENCY_ID" \
     -H "X-Break-Glass: true" \
     -H "X-Break-Glass-Justification: Code Blue cardiac arrest"
 
+# -----------------------------------------------------------
+# Step 6 — consent enforcement
+# -----------------------------------------------------------
+title "Consent enforcement"
+
+# Seed two patients with different consent profiles.
+dim "Seeding consent test patients..."
+CONSENT_PID=$(seed_patient "ConsOK" "MRN-C001")
+NOCONSENT_PID=$(seed_patient "ConsDenied" "MRN-C002")
+ok "consent patient = Patient/${CONSENT_PID}"
+ok "no-consent patient = Patient/${NOCONSENT_PID}"
+
+# Post Consent resources via the upstream FHIR server.
+dim "Posting Consent resources..."
+curl -s -X POST "${FHIR_DIRECT}/Consent" \
+    -H "Content-Type: application/fhir+json" \
+    -d "{
+        \"resourceType\": \"Consent\", \"status\": \"active\",
+        \"scope\": {\"coding\": [{\"code\": \"patient-privacy\"}]},
+        \"category\": [{\"coding\": [{\"code\": \"59284-0\"}]}],
+        \"patient\": {\"reference\": \"Patient/${CONSENT_PID}\"},
+        \"provision\": {\"type\": \"permit\", \"purpose\": [{\"code\": \"TREATMENT\"}, {\"code\": \"PAYMENT\"}]}
+    }" > /dev/null
+ok "Consent for Patient/${CONSENT_PID}: TREATMENT + PAYMENT"
+
+curl -s -X POST "${FHIR_DIRECT}/Consent" \
+    -H "Content-Type: application/fhir+json" \
+    -d "{
+        \"resourceType\": \"Consent\", \"status\": \"active\",
+        \"scope\": {\"coding\": [{\"code\": \"patient-privacy\"}]},
+        \"category\": [{\"coding\": [{\"code\": \"59284-0\"}]}],
+        \"patient\": {\"reference\": \"Patient/${NOCONSENT_PID}\"},
+        \"provision\": {\"type\": \"permit\", \"purpose\": [{\"code\": \"RESEARCH\"}]}
+    }" > /dev/null
+ok "Consent for Patient/${NOCONSENT_PID}: RESEARCH only"
+
+dim "doctor1 + TREATMENT → Patient/${CONSENT_PID} (should ALLOW)"
+query "doctor-consent" "$DOCTOR_TOKEN" "$CONSENT_PID" \
+    -H "X-Purpose-Of-Use: TREATMENT"
+
+dim "doctor1 + TREATMENT → Patient/${NOCONSENT_PID} (should DENY — only RESEARCH)"
+query "doctor-noconsent" "$DOCTOR_TOKEN" "$NOCONSENT_PID" \
+    -H "X-Purpose-Of-Use: TREATMENT"
+
+dim "doctor1 + EMERGENCY → Patient/${NOCONSENT_PID} (should ALLOW — EMERGENCY bypasses consent)"
+query "doctor-emergency" "$DOCTOR_TOKEN" "$NOCONSENT_PID" \
+    -H "X-Purpose-Of-Use: EMERGENCY"
+
 title "Done"
 echo
 echo "Expected outcomes summary:"
-echo "  nurse (normal)    -> identifier REMOVED, telecom+address MASKED"
-echo "  doctor (normal)   -> identifier VISIBLE, address MASKED"
-echo "  admin (normal)    -> all fields VISIBLE"
-echo "  nurse (sensitive) -> 403 (unless break-glass)"
-echo "  nurse (break-glass) -> all fields VISIBLE, audited as BREAK_GLASS"
+echo "  nurse (normal)        -> identifier REMOVED, telecom+address MASKED"
+echo "  doctor (normal)       -> identifier VISIBLE, address MASKED"
+echo "  admin (normal)        -> all fields VISIBLE"
+echo "  nurse (sensitive)     -> 403 (unless break-glass)"
+echo "  nurse (break-glass)   -> all fields VISIBLE, audited as BREAK_GLASS"
+echo "  doctor + TREATMENT    -> consented patient OK, non-consented DENIED"
+echo "  doctor + EMERGENCY    -> non-consented patient ALLOWED (emergency bypass)"

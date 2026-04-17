@@ -54,6 +54,21 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 		patientID = parts[1]
 	}
 
+	resource := map[string]interface{}{
+		"type":       resourceType,
+		"patient_id": patientID,
+	}
+
+	// Hoist consent info from SubjectContext into input.resource so
+	// the OPA policy can read it as `input.resource.consent`.
+	// SubjectContext is an opaque interface{} here, so use a JSON
+	// round-trip to introspect the consent field.
+	if subMap, ok := structToMap(subject); ok {
+		if consentVal, exists := subMap["consent"]; exists && consentVal != nil {
+			resource["consent"] = consentVal
+		}
+	}
+
 	input := map[string]interface{}{
 		"subject": subject,
 		"request": map[string]interface{}{
@@ -61,14 +76,13 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 			"path":       r.URL.Path,
 			"path_parts": parts,
 		},
-		"resource": map[string]interface{}{
-			"type":       resourceType,
-			"patient_id": patientID,
-		},
+		"resource": resource,
 	}
-	// The SubjectContext carries a `risk` field via json tag, so the
-	// OPA policy can already reach it via `input.subject.risk.score`.
-	// No additional hoisting is needed.
+	// The SubjectContext carries `risk` and `consent` via json tags,
+	// so the OPA policy reaches them via:
+	//   input.subject.risk.score
+	//   input.subject.purpose_of_use
+	//   input.resource.consent.status / .allowed_purposes / etc.
 
 	body, err := json.Marshal(opaRequest{Input: input})
 	if err != nil {
@@ -98,6 +112,21 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 	}
 
 	return &opaResp.Result, nil
+}
+
+// structToMap converts a struct to map[string]interface{} via JSON
+// so we can hoist fields like consent into the OPA resource input
+// without importing the auth package (which would create a cycle).
+func structToMap(v interface{}) (map[string]interface{}, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	return m, true
 }
 
 // splitFHIRPathParts extracts the FHIR resource segments from a request path.

@@ -18,6 +18,7 @@ import (
 	"github.com/vikram290227/fhir-privacy-proxy/internal/audit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/cache"
+	"github.com/vikram290227/fhir-privacy-proxy/internal/consent"
 	fhirredact "github.com/vikram290227/fhir-privacy-proxy/internal/fhir"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/metrics"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
@@ -198,6 +199,19 @@ func main() {
 	riskServiceURL := os.Getenv("RISK_SERVICE_URL")
 	riskClient := risk.NewClient(riskServiceURL, logger)
 
+	// Consent checker — queries upstream FHIR for Consent resources.
+	// Cached with a 5-minute TTL / 1024-entry LRU so consent lookups
+	// don't add a round-trip to every request for the same patient.
+	var consentChecker *consent.Checker
+	if fhirUpstream != "" {
+		var err error
+		consentChecker, err = consent.NewChecker(fhirUpstream, logger, 1024, 5*time.Minute)
+		if err != nil {
+			logger.Fatal("failed to create consent checker", zap.Error(err))
+		}
+		logger.Info("consent checker enabled", zap.String("fhir_upstream", fhirUpstream))
+	}
+
 	// Mount the management API at /admin/v1 when ADMIN_API_KEY is set.
 	// All endpoints require the X-Admin-Key header to match the env
 	// var; an unset key keeps the surface entirely off the wire so
@@ -248,6 +262,7 @@ func main() {
 		// unset — the ML layer remains the backstop in that case.
 		r.Use(authMiddleware.RateLimit)
 		r.Use(authMiddleware.ScoreRisk(riskClient))
+		r.Use(authMiddleware.CheckConsent(consentChecker))
 		r.Use(authMiddleware.EnforcePolicy(opaClient))
 
 		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditSink)))
