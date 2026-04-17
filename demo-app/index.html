@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FHIR Privacy Proxy — SMART App Demo</title>
+<style>
+  :root { --bg: #f8f9fa; --card: #fff; --border: #dee2e6; --primary: #0d6efd; --danger: #dc3545; --success: #198754; --muted: #6c757d; --font: system-ui, -apple-system, sans-serif; --mono: 'SFMono-Regular', Consolas, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font); background: var(--bg); color: #212529; line-height: 1.5; padding: 2rem; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 0.75rem; }
+  label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem; }
+  select, input { width: 100%; padding: 0.4rem 0.6rem; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font); font-size: 0.9rem; margin-bottom: 0.75rem; }
+  button { padding: 0.5rem 1.25rem; border: none; border-radius: 4px; font-size: 0.9rem; cursor: pointer; font-weight: 600; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: #0b5ed7; }
+  .btn-primary:disabled { background: #6c757d; cursor: not-allowed; }
+  .btn-danger { background: var(--danger); color: #fff; margin-left: 0.5rem; }
+  .row { display: flex; gap: 1rem; }
+  .row > * { flex: 1; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-family: var(--mono); font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; max-height: 500px; overflow-y: auto; }
+  .tag { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.75rem; font-weight: 600; margin-right: 0.25rem; }
+  .tag-removed { background: #f8d7da; color: var(--danger); }
+  .tag-masked { background: #fff3cd; color: #856404; }
+  .tag-visible { background: #d1e7dd; color: var(--success); }
+  .status { padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.85rem; margin-bottom: 0.75rem; }
+  .status-info { background: #cff4fc; color: #055160; }
+  .status-success { background: #d1e7dd; color: #0f5132; }
+  .status-error { background: #f8d7da; color: #842029; }
+  .field-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .field-table th, .field-table td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .field-table th { font-weight: 600; background: var(--bg); }
+  #log { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); max-height: 150px; overflow-y: auto; padding: 0.5rem; background: var(--bg); border-radius: 4px; border: 1px solid var(--border); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>FHIR Privacy Proxy &mdash; SMART App Demo</h1>
+<p class="subtitle">Authorization Code + PKCE flow against Keycloak, then FHIR read through the privacy proxy.</p>
+
+<div class="card" id="config-card">
+  <h2>1. Configuration</h2>
+  <div class="row">
+    <div>
+      <label for="user-select">Login as</label>
+      <select id="user-select">
+        <option value="nurse1">nurse1 (Nurse &mdash; cardiology)</option>
+        <option value="doctor1">doctor1 (Doctor &mdash; cardiology)</option>
+        <option value="admin1">admin1 (Admin)</option>
+      </select>
+    </div>
+    <div>
+      <label for="patient-id">Patient ID</label>
+      <input type="text" id="patient-id" value="" placeholder="Leave blank to search">
+    </div>
+  </div>
+  <button class="btn-primary" id="launch-btn" onclick="startLaunch()">Launch SMART App</button>
+</div>
+
+<div class="card hidden" id="token-card">
+  <h2>2. Token</h2>
+  <div id="token-status"></div>
+  <details>
+    <summary style="cursor:pointer; font-size:0.85rem; color:var(--muted);">Decoded access token</summary>
+    <pre id="token-decoded"></pre>
+  </details>
+  <div style="margin-top:0.75rem;">
+    <button class="btn-primary" id="fetch-btn" onclick="fetchPatient()">Fetch Patient</button>
+    <button class="btn-danger" onclick="logout()">Logout</button>
+  </div>
+</div>
+
+<div class="card hidden" id="result-card">
+  <h2>3. Response</h2>
+  <div id="result-status"></div>
+  <div id="field-analysis" class="hidden" style="margin-bottom:0.75rem;"></div>
+  <pre id="result-body"></pre>
+</div>
+
+<div class="card">
+  <h2>Event Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+const CONFIG = {
+  keycloakBase: 'http://localhost:8180',
+  realm:        'hospital-a',
+  clientId:     'fhir-privacy-proxy',
+  redirectUri:  window.location.origin + '/',
+  proxyBase:    'http://localhost:8080',
+  scope:        'openid',
+};
+
+const SENSITIVE_FIELDS = ['identifier', 'telecom', 'address', 'birthDate'];
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML += ts + ' ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function show(id) { document.getElementById(id).classList.remove('hidden'); }
+function hide(id) { document.getElementById(id).classList.add('hidden'); }
+
+function setStatus(id, cls, msg) {
+  const el = document.getElementById(id);
+  el.className = 'status status-' + cls;
+  el.textContent = msg;
+}
+
+// --- PKCE helpers ---
+function generateRandomString(len) {
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return btoa(String.fromCharCode(...arr))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256(plain) {
+  const enc = new TextEncoder();
+  const hash = await crypto.subtle.digest('SHA-256', enc.encode(plain));
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// --- Launch ---
+async function startLaunch() {
+  const user = document.getElementById('user-select').value;
+  const codeVerifier = generateRandomString(64);
+  const codeChallenge = await sha256(codeVerifier);
+  const state = generateRandomString(16);
+
+  sessionStorage.setItem('pkce_code_verifier', codeVerifier);
+  sessionStorage.setItem('oauth_state', state);
+  sessionStorage.setItem('selected_user', user);
+  sessionStorage.setItem('patient_id', document.getElementById('patient-id').value);
+
+  const params = new URLSearchParams({
+    response_type:         'code',
+    client_id:             CONFIG.clientId,
+    redirect_uri:          CONFIG.redirectUri,
+    scope:                 CONFIG.scope,
+    state:                 state,
+    code_challenge:        codeChallenge,
+    code_challenge_method: 'S256',
+    login_hint:            user,
+  });
+
+  const authUrl = CONFIG.keycloakBase + '/realms/' + CONFIG.realm +
+    '/protocol/openid-connect/auth?' + params.toString();
+
+  log('Redirecting to Keycloak authorize endpoint...');
+  log('PKCE code_challenge: ' + codeChallenge.substring(0, 20) + '...');
+  window.location.href = authUrl;
+}
+
+// --- Callback handling ---
+async function handleCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const state = params.get('state');
+  const error = params.get('error');
+
+  if (error) {
+    log('Authorization error: ' + error + ' - ' + params.get('error_description'));
+    return;
+  }
+  if (!code) return;
+
+  window.history.replaceState({}, document.title, '/');
+
+  const savedState = sessionStorage.getItem('oauth_state');
+  if (state !== savedState) {
+    log('ERROR: state mismatch (CSRF protection triggered)');
+    return;
+  }
+
+  const codeVerifier = sessionStorage.getItem('pkce_code_verifier');
+  log('Authorization code received, exchanging for token...');
+
+  const tokenUrl = CONFIG.keycloakBase + '/realms/' + CONFIG.realm +
+    '/protocol/openid-connect/token';
+
+  const body = new URLSearchParams({
+    grant_type:    'authorization_code',
+    client_id:     CONFIG.clientId,
+    code:          code,
+    redirect_uri:  CONFIG.redirectUri,
+    code_verifier: codeVerifier,
+  });
+
+  try {
+    const resp = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body,
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      log('Token exchange failed: ' + data.error_description);
+      setStatus('token-status', 'error', 'Token exchange failed: ' + data.error_description);
+      show('token-card');
+      return;
+    }
+
+    sessionStorage.setItem('access_token', data.access_token);
+    const decoded = parseJwt(data.access_token);
+    log('Token obtained for ' + (decoded.preferred_username || decoded.sub));
+
+    show('token-card');
+    setStatus('token-status', 'success',
+      'Authenticated as ' + (decoded.preferred_username || decoded.sub) +
+      ' | Roles: ' + (decoded.realm_access?.roles || []).join(', '));
+    document.getElementById('token-decoded').textContent = JSON.stringify(decoded, null, 2);
+
+    const savedPid = sessionStorage.getItem('patient_id');
+    if (savedPid) document.getElementById('patient-id').value = savedPid;
+
+  } catch (e) {
+    log('Token exchange error: ' + e.message);
+  }
+}
+
+function parseJwt(token) {
+  const base64Url = token.split('.')[1];
+  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+  return JSON.parse(decodeURIComponent(
+    atob(base64).split('').map(c =>
+      '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+    ).join('')
+  ));
+}
+
+// --- FHIR fetch ---
+async function fetchPatient() {
+  const token = sessionStorage.getItem('access_token');
+  if (!token) { log('No token — launch first'); return; }
+
+  const pid = document.getElementById('patient-id').value.trim();
+  const url = pid
+    ? CONFIG.proxyBase + '/fhir/r4/Patient/' + pid
+    : CONFIG.proxyBase + '/fhir/r4/Patient?_count=3';
+
+  log('GET ' + url);
+  document.getElementById('fetch-btn').disabled = true;
+
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/fhir+json',
+      },
+    });
+
+    const body = await resp.json();
+    show('result-card');
+
+    if (resp.ok) {
+      setStatus('result-status', 'success', 'HTTP ' + resp.status + ' OK');
+      document.getElementById('result-body').textContent = JSON.stringify(body, null, 2);
+
+      if (body.resourceType === 'Patient') {
+        analyzeFields(body);
+      } else if (body.resourceType === 'Bundle' && body.entry) {
+        log('Bundle with ' + body.entry.length + ' entries');
+        if (body.entry.length > 0 && body.entry[0].resource) {
+          analyzeFields(body.entry[0].resource);
+        }
+      }
+    } else {
+      setStatus('result-status', 'error', 'HTTP ' + resp.status);
+      document.getElementById('result-body').textContent = JSON.stringify(body, null, 2);
+    }
+  } catch (e) {
+    show('result-card');
+    setStatus('result-status', 'error', 'Request failed: ' + e.message);
+    document.getElementById('result-body').textContent = e.message;
+  }
+
+  document.getElementById('fetch-btn').disabled = false;
+}
+
+function analyzeFields(resource) {
+  const el = document.getElementById('field-analysis');
+  let html = '<table class="field-table"><tr><th>Field</th><th>Status</th></tr>';
+
+  for (const field of SENSITIVE_FIELDS) {
+    let status, cls;
+    if (!(field in resource)) {
+      status = 'REMOVED'; cls = 'removed';
+    } else if (resource[field] === '***REDACTED***') {
+      status = 'MASKED'; cls = 'masked';
+    } else {
+      status = 'VISIBLE'; cls = 'visible';
+    }
+    html += '<tr><td>' + field + '</td><td><span class="tag tag-' + cls + '">' + status + '</span></td></tr>';
+  }
+
+  html += '</table>';
+  el.innerHTML = html;
+  show('field-analysis');
+  log('Field analysis complete');
+}
+
+function logout() {
+  sessionStorage.clear();
+  hide('token-card');
+  hide('result-card');
+  document.getElementById('token-decoded').textContent = '';
+  log('Session cleared');
+}
+
+// --- Init ---
+window.addEventListener('DOMContentLoaded', () => {
+  log('SMART App Demo loaded');
+  log('Keycloak: ' + CONFIG.keycloakBase + '/realms/' + CONFIG.realm);
+  log('Proxy: ' + CONFIG.proxyBase);
+
+  const existing = sessionStorage.getItem('access_token');
+  if (existing) {
+    try {
+      const decoded = parseJwt(existing);
+      const exp = decoded.exp * 1000;
+      if (Date.now() < exp) {
+        log('Restored existing session for ' + decoded.preferred_username);
+        show('token-card');
+        setStatus('token-status', 'success',
+          'Authenticated as ' + decoded.preferred_username +
+          ' | Roles: ' + (decoded.realm_access?.roles || []).join(', '));
+        document.getElementById('token-decoded').textContent = JSON.stringify(decoded, null, 2);
+        return;
+      }
+      log('Stored token expired, clearing');
+      sessionStorage.clear();
+    } catch (e) { sessionStorage.clear(); }
+  }
+
+  handleCallback();
+});
+</script>
+</body>
+</html>

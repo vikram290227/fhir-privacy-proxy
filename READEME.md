@@ -65,12 +65,38 @@ Once traffic starts flowing the observability stack is reachable at:
 See `docs/architecture.md` for the full observability stack diagram
 and the list of metrics the dashboard is built on.
 
+## Try the Demo App
+
+A browser-based SMART-on-FHIR demo app is included. It implements the
+full authorization code + PKCE flow against Keycloak, then calls the
+FHIR proxy and displays redacted Patient resources.
+
+```bash
+make up
+open http://localhost:3001
+```
+
+1. Pick a user (nurse1, doctor1, or admin1) and click **Launch SMART App**
+2. Log in at Keycloak (password: `password` for all users)
+3. Click **Fetch Patient** to see the redacted FHIR response
+4. The field analysis table shows which fields were REMOVED, MASKED, or VISIBLE
+
+To automate the same flow via curl:
+
+```bash
+./scripts/test_smart_launch.sh nurse1 password
+./scripts/test_smart_launch.sh doctor1 password
+```
+
+See `docs/smart_app_launch.md` for the full sequence diagram and PKCE details.
+
 ## Endpoints
 
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check |
 | `GET /metrics` | Prometheus metrics |
+| `GET /fhir/r4/metadata` | FHIR CapabilityStatement (unauthenticated, per SMART spec) |
 | `POST /webhook/revoke` | Keycloak token revocation webhook |
 | `GET /fhir/r4/*` | Protected FHIR proxy (requires JWT) |
 | `* /admin/v1/*` | Management API (gated by `X-Admin-Key`, see [Admin API](#admin-api)) |

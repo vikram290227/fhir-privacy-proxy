@@ -86,6 +86,14 @@ services:
       - ../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
 
+  demo-app:
+    image: python:3.12-slim
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../../demo-app:/app:ro
+    command: ["python", "-m", "http.server", "3001", "--directory", "/app"]
+
   proxy:
     build:
       context: ../..

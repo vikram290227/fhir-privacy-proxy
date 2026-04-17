@@ -17,8 +17,17 @@
       "enabled": true,
       "publicClient": true,
       "directAccessGrantsEnabled": true,
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://localhost:3001/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3001"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "fhirContext-department",
