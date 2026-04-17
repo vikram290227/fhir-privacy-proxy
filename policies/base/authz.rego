@@ -25,12 +25,14 @@ risk_score := s if {
 # Allow rules
 # -----------------------------------------------------------
 
-# Standard access: user has roles + passes resource & department checks
+# Standard access: user has roles + passes resource, department,
+# consent, and risk checks.
 allow if {
     input.subject.has_roles
     valid_role_for_resource
     valid_department_access
     not is_sensitive_patient
+    consent_permits
     risk_score < risk_deny_threshold
 }
 
@@ -38,11 +40,12 @@ allow if {
 allow if {
     "admin" in input.subject.roles
     input.subject.has_roles
+    consent_permits
     risk_score < risk_deny_threshold
 }
 
-# Break-glass override — bypasses sensitivity and risk thresholds,
-# but is heavily audited and triggers mandatory review.
+# Break-glass override — bypasses sensitivity, consent, and risk
+# thresholds, but is heavily audited and triggers mandatory review.
 allow if {
     input.subject.break_glass.enabled
     "can_break_glass" in input.subject.roles
@@ -95,6 +98,12 @@ reason := "no_roles" if {
     not input.subject.has_roles
 }
 
+reason := "consent_denied" if {
+    input.subject.has_roles
+    not consent_permits
+    not input.subject.break_glass.enabled
+}
+
 reason := "high_risk_denied" if {
     risk_score >= risk_deny_threshold
     not input.subject.break_glass.enabled
@@ -120,7 +129,42 @@ reason := "elevated_risk_authorized" if {
 reason := "access_denied" if {
     not allow
     input.subject.has_roles
+    consent_permits
     risk_score < risk_deny_threshold
+}
+
+# -----------------------------------------------------------
+# Consent rules
+# -----------------------------------------------------------
+
+# When no consent resource is present (the proxy didn't find a
+# Consent for this patient), we permit by default so existing
+# deployments that haven't adopted consent enforcement keep working.
+default consent_permits := true
+
+# Explicit deny: consent status is inactive or rejected.
+consent_permits := false if {
+    input.resource.consent
+    input.resource.consent.status in ["inactive", "rejected"]
+}
+
+# When a consent exists and is active, the request's purpose_of_use
+# must appear in the consent's allowed_purposes list.
+consent_permits := false if {
+    input.resource.consent
+    input.resource.consent.status == "active"
+    count(input.resource.consent.allowed_purposes) > 0
+    not purpose_allowed
+}
+
+purpose_allowed if {
+    input.subject.purpose_of_use in input.resource.consent.allowed_purposes
+}
+
+# EMERGENCY purpose always satisfies consent (break-glass for
+# purpose, distinct from the header-based break-glass for role).
+consent_permits if {
+    input.subject.purpose_of_use == "EMERGENCY"
 }
 
 # -----------------------------------------------------------
@@ -191,4 +235,21 @@ annotations[msg] if {
     risk_score >= risk_mask_threshold
     msg := sprintf("ELEVATED_RISK: score=%v subject=%s path=%s",
         [risk_score, input.subject.subject_id, input.request.path])
+}
+
+annotations[msg] if {
+    input.resource.consent
+    not consent_permits
+    msg := sprintf("CONSENT_DENIED: subject=%s patient=%s purpose=%s",
+        [input.subject.subject_id,
+         input.resource.patient_id,
+         input.subject.purpose_of_use])
+}
+
+annotations[msg] if {
+    input.subject.purpose_of_use == "EMERGENCY"
+    input.resource.consent
+    msg := sprintf("EMERGENCY_CONSENT_BYPASS: subject=%s patient=%s",
+        [input.subject.subject_id,
+         input.resource.patient_id])
 }

@@ -42,7 +42,8 @@ Client → [JWT] → Proxy (8080) → Upstream FHIR (8090)
 ## Quick Start
 
 ```bash
-# Start all services
+# Start all services (proxy + Keycloak + OPA + Redis + HAPI FHIR +
+# risk service + Jaeger + Prometheus + Grafana)
 make up
 
 # Wait for Keycloak (~30s), then test health
@@ -52,6 +53,17 @@ curl http://localhost:8080/health
 ./scripts/get_token.sh nurse1 password
 ./scripts/test_patient.sh
 ```
+
+Once traffic starts flowing the observability stack is reachable at:
+
+| URL | What you get |
+|---|---|
+| http://localhost:3000  | **Grafana** — the pre-provisioned "FHIR Privacy Proxy" dashboard (request rate, latency percentiles, policy outcomes, risk-score mix, break-glass, auth failures, active connections). Anonymous admin — local dev only. |
+| http://localhost:16686 | **Jaeger** — distributed traces. Search `service=fhir-privacy-proxy` and drill into any request to see auth, rate-limit, risk, OPA, and upstream spans. |
+| http://localhost:9090  | **Prometheus** — raw PromQL explorer for anything the dashboard doesn't surface. |
+
+See `docs/architecture.md` for the full observability stack diagram
+and the list of metrics the dashboard is built on.
 
 ## Endpoints
 
@@ -74,6 +86,7 @@ curl http://localhost:8080/health
 | `RISK_SERVICE_URL` | (disabled) | FastAPI risk-scoring service URL |
 | `ADMIN_API_KEY` | (disabled) | Static API key for `/admin/v1/*` (omit to leave the surface entirely off the wire) |
 | `POLICIES_DIR` | `policies` | Root for `versions/<v>/authz.rego` bundles consumed by the policy version manager |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (no-op exporter) | OTLP/HTTP endpoint for Jaeger / OTel Collector / Tempo. Accepts `http://host:port`, `https://host:port`, or bare `host:port`. Unset = spans stay local. |
 
 ### Rate limiting
 

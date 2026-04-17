@@ -1,0 +1,72 @@
+# Nightly retraining scaffold for the IsolationForest risk model.
+#
+# NOTE: This is a SCAFFOLD. In a real deployment you would:
+#   * Pull the access_logs.csv + feedback.ndjson from a durable store
+#     (S3 / Azure Blob / GCS) instead of checking them into git.
+#   * Push the resulting iforest.joblib back to that same store.
+#   * Signal the FastAPI pods to re-observe the shared volume or pull
+#     the new artifact (the mtime hot-reload works unchanged once the
+#     file on disk is swapped).
+#   * Wire a Slack/PagerDuty notification on a non-zero exit and/or on
+#     a sharp jump in risk_model_anomaly_rate between runs.
+#
+# As shipped, this workflow trains against whatever CSV/NDJSON happen
+# to be present in ml/data/ (typically nothing in a fresh checkout),
+# publishes the joblib + meta.json as a build artifact, and emits the
+# retrain summary to the run log. Fork it and wire in your storage of
+# choice.
+
+name: retrain
+
+on:
+  schedule:
+    # 02:00 UTC every day. Off-peak for most healthcare deployments.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: ml/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r ml/requirements.txt
+
+      # Seed a training set if none is checked in. In a real
+      # deployment this step is replaced by `aws s3 cp` / `azcopy` /
+      # equivalent.
+      - name: Seed synthetic training data if missing
+        run: |
+          if [ ! -f ml/data/access_logs.csv ]; then
+            python ml/generate_dataset.py \
+              --rows 5000 \
+              --out ml/data/access_logs.csv
+          fi
+
+      - name: Retrain
+        run: |
+          python ml/retrain_nightly.py \
+            --input ml/data/access_logs.csv \
+            --feedback ml/data/feedback.ndjson \
+            --model ml/models/iforest.joblib
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iforest-${{ github.run_id }}
+          path: |
+            ml/models/iforest.joblib
+            ml/models/iforest.joblib.meta.json
+          if-no-files-found: error
+          retention-days: 14

@@ -132,6 +132,53 @@ Stateless HTTP service exposing:
 The service loads an IsolationForest pipeline from disk and optionally
 wraps it with a SHAP `TreeExplainer` for per-feature attributions.
 
+### FHIR Consent enforcement (`internal/consent/`)
+
+The proxy enforces patient-level consent before OPA evaluates the
+access-control policy. The middleware chain for a protected FHIR
+request now runs:
+
+```
+ValidateToken → RequireSmartScope → RateLimit → ScoreRisk
+  → CheckConsent → EnforcePolicy → fhirProxyHandler
+```
+
+`CheckConsent` extracts the patient ID from the request path, queries
+the upstream FHIR server for the most recent active `Consent` resource
+referencing that patient, and attaches a `ConsentInfo` struct to the
+`SubjectContext`. The struct is also hoisted into OPA input as
+`input.resource.consent` so Rego rules can evaluate:
+
+- `consent.status` — `active`, `inactive`, `rejected`
+- `consent.scope` — e.g. `patient-privacy`
+- `consent.allowed_purposes` — list of codes like `TREATMENT`, `PAYMENT`
+- `consent.provision_type` — `permit` or `deny`
+
+**Purpose of use.** Callers pass `X-Purpose-Of-Use: <purpose>` on the
+request (defaults to `TREATMENT` when absent). Valid values:
+`TREATMENT`, `PAYMENT`, `OPERATIONS`, `EMERGENCY`, `RESEARCH`.
+The middleware rejects unrecognised values with 400 before they reach
+OPA.
+
+**Policy rules** (in `policies/base/authz.rego` and v3):
+
+| Condition | Result |
+|---|---|
+| No consent on file for the patient | Permit (backwards-compat) |
+| `consent.status` is `inactive` or `rejected` | Deny (`consent_denied`) |
+| `consent.status == "active"` and purpose not in `allowed_purposes` | Deny |
+| `X-Purpose-Of-Use: EMERGENCY` | Always permit (overrides consent) |
+| Break-glass (`X-Break-Glass: true`) | Always permit (overrides consent) |
+
+**Caching.** An in-memory LRU (hashicorp/golang-lru, 1024 entries,
+5-minute TTL) keyed on `(patient_id, purpose_of_use)` prevents a FHIR
+search round-trip on every request for the same patient.
+
+**Seed data.** `scripts/seed_consent.sh` POSTs sample Consent resources
+to the upstream HAPI FHIR server for two test patients — one consenting
+to `TREATMENT + PAYMENT`, the other to `RESEARCH` only — so `demo.sh`
+can walk through consented / non-consented / emergency-bypass flows.
+
 ### Audit log
 Append-only NDJSON file at `$AUDIT_LOG_FILE` (dev) or Azure Blob
 (production). Each line carries the full context needed for forensic
@@ -150,6 +197,64 @@ redacted paths, and break-glass detail.
 - `fhir_proxy_rate_limit_hits_total{tenant,subject,window}`
 - `fhir_proxy_break_glass_total`
 - `fhir_proxy_auth_failures_total`
+
+## Observability stack
+
+The three observability signals — logs, metrics, and traces — are
+each served by a dedicated sidecar in `deployments/docker/docker-compose.yml`
+so an operator can ask "what is the proxy doing right now?" from any
+of three angles without touching the proxy process.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                         fhir-privacy-proxy                     │
+│                                                                │
+│   zap (stdout)       /metrics            OTel tracer           │
+│       │                  │                    │                │
+└───────┼──────────────────┼────────────────────┼────────────────┘
+        │                  │                    │
+        ▼                  ▼                    ▼
+   container logs    ┌──────────────┐    ┌──────────────┐
+     (docker logs)   │ Prometheus   │    │ Jaeger       │
+                     │  :9090       │    │ all-in-one   │
+                     │  scrape 5s   │    │ :4318 (OTLP) │
+                     └──────┬───────┘    │ :16686 (UI)  │
+                            │ query      └──────────────┘
+                            ▼
+                     ┌──────────────┐
+                     │ Grafana      │
+                     │ :3000        │
+                     │ provisioned  │
+                     │ dashboard    │
+                     └──────────────┘
+```
+
+**Tracing.** `internal/tracing/tracing.go` installs an OTLP/HTTP
+exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (the compose file
+points it at `http://jaeger:4318`) and falls back to a no-op exporter
+otherwise, so unit tests and `go run` stay side-effect free. Every
+span carries `service.name=fhir-privacy-proxy` and
+`service.version=<ldflag>` — set from `git describe` by the
+Makefile and from `--build-arg VERSION=…` by the Dockerfile — so
+a regression can be traced back to a specific commit in the Jaeger
+UI without cross-referencing a build log.
+
+**Metrics.** Prometheus scrapes two targets out of the box:
+`proxy:8080/metrics` (the `fhir_proxy_*` family above) and
+`risk:8000/metrics` (the `risk_model_*` gauges emitted by the
+Python service's `retrain_nightly.py` sidecar). Config lives at
+`deployments/prometheus/prometheus.yml`.
+
+**Dashboards.** `deployments/grafana/dashboards/dashboard.json` is
+auto-provisioned via `deployments/grafana/provisioning/` and
+presents the golden-signal cuts an on-call engineer actually needs:
+request rate by method + status, p50/p95/p99 latency for both the
+end-to-end request and the upstream FHIR call alone, a policy
+outcome piechart (allow/mask/deny keyed by reason), a risk score
+distribution (normal/suspicious/anomalous), break-glass events per
+tenant, auth failures by reason, and active connections. Grafana is
+provisioned in anonymous-admin mode for local dev — do **not**
+copy that configuration to production.
 
 ## Multi-tenant isolation
 

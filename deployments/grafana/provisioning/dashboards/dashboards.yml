@@ -1,0 +1,18 @@
+# Dashboard provider. Grafana polls the mounted directory every
+# `updateIntervalSeconds` for new/changed JSON files and re-imports
+# them — edits to deployments/grafana/dashboards/dashboard.json show
+# up in the UI without a Grafana restart.
+
+apiVersion: 1
+
+providers:
+  - name: fhir-privacy-proxy
+    orgId: 1
+    folder: FHIR Privacy Proxy
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,7 +1,7 @@
 # Snapshot: policies/versions/v3 — tightens nurse-scope redaction by
 # adding birthDate to the baseline mask list. Everything else is
 # inherited verbatim from v2 (risk-aware thresholds, per-tenant
-# sensitive patient lookup, break-glass handling).
+# sensitive patient lookup, break-glass handling, consent enforcement).
 #
 # Rationale: HIPAA treats birthDate as a quasi-identifier (one of the
 # 18 Safe Harbor elements). v2 only masked it under elevated risk;
@@ -37,12 +37,14 @@ allow if {
     valid_role_for_resource
     valid_department_access
     not is_sensitive_patient
+    consent_permits
     risk_score < risk_deny_threshold
 }
 
 allow if {
     "admin" in input.subject.roles
     input.subject.has_roles
+    consent_permits
     risk_score < risk_deny_threshold
 }
 
@@ -94,6 +96,12 @@ reason := "no_roles" if {
     not input.subject.has_roles
 }
 
+reason := "consent_denied" if {
+    input.subject.has_roles
+    not consent_permits
+    not input.subject.break_glass.enabled
+}
+
 reason := "high_risk_denied" if {
     risk_score >= risk_deny_threshold
     not input.subject.break_glass.enabled
@@ -119,7 +127,33 @@ reason := "elevated_risk_authorized" if {
 reason := "access_denied" if {
     not allow
     input.subject.has_roles
+    consent_permits
     risk_score < risk_deny_threshold
+}
+
+# -----------------------------------------------------------
+# Consent rules
+# -----------------------------------------------------------
+default consent_permits := true
+
+consent_permits := false if {
+    input.resource.consent
+    input.resource.consent.status in ["inactive", "rejected"]
+}
+
+consent_permits := false if {
+    input.resource.consent
+    input.resource.consent.status == "active"
+    count(input.resource.consent.allowed_purposes) > 0
+    not purpose_allowed
+}
+
+purpose_allowed if {
+    input.subject.purpose_of_use in input.resource.consent.allowed_purposes
+}
+
+consent_permits if {
+    input.subject.purpose_of_use == "EMERGENCY"
 }
 
 # -----------------------------------------------------------
@@ -174,4 +208,21 @@ annotations[msg] if {
     risk_score >= risk_mask_threshold
     msg := sprintf("ELEVATED_RISK: score=%v subject=%s path=%s",
         [risk_score, input.subject.subject_id, input.request.path])
+}
+
+annotations[msg] if {
+    input.resource.consent
+    not consent_permits
+    msg := sprintf("CONSENT_DENIED: subject=%s patient=%s purpose=%s",
+        [input.subject.subject_id,
+         input.resource.patient_id,
+         input.subject.purpose_of_use])
+}
+
+annotations[msg] if {
+    input.subject.purpose_of_use == "EMERGENCY"
+    input.resource.consent
+    msg := sprintf("EMERGENCY_CONSENT_BYPASS: subject=%s patient=%s",
+        [input.subject.subject_id,
+         input.resource.patient_id])
 }
