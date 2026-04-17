@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -251,6 +252,10 @@ func main() {
 
 	upstreamClient := &http.Client{Timeout: 30 * time.Second}
 
+	// Unauthenticated metadata endpoint — SMART-on-FHIR and Inferno
+	// require /metadata to be accessible without a bearer token.
+	r.Get("/fhir/r4/metadata", metadataProxyHandler(fhirUpstream, upstreamClient, logger))
+
 	// Protected FHIR endpoints
 	r.Route("/fhir/r4", func(r chi.Router) {
 		r.Use(authMiddleware.ValidateToken)
@@ -421,6 +426,75 @@ func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {
 			w.Header().Set(h, v)
 		}
 	}
+}
+
+// metadataProxyHandler returns a handler that proxies the upstream FHIR
+// CapabilityStatement and rewrites server URLs to point at this proxy.
+func metadataProxyHandler(upstream string, client *http.Client, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		upstreamURL := upstream + "/metadata"
+
+		ctx, span := tracing.Tracer().Start(r.Context(), "upstream.metadata")
+		defer span.End()
+
+		upReq, err := http.NewRequestWithContext(ctx, "GET", upstreamURL, nil)
+		if err != nil {
+			logger.Error("failed to create metadata request", zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		upReq.Header.Set("Accept", "application/fhir+json")
+
+		resp, err := client.Do(upReq)
+		if err != nil {
+			logger.Error("upstream metadata request failed", zap.Error(err))
+			http.Error(w, "upstream unreachable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			logger.Error("failed to read metadata body", zap.Error(err))
+			http.Error(w, "upstream read error", http.StatusBadGateway)
+			return
+		}
+
+		if resp.StatusCode == http.StatusOK && strings.Contains(resp.Header.Get("Content-Type"), "json") {
+			scheme := "http"
+			if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+				scheme = "https"
+			}
+			proxyBase := scheme + "://" + r.Host + "/fhir/r4"
+			body = rewriteCapabilityStatementURL(body, proxyBase)
+		}
+
+		copyResponseHeaders(w, resp)
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}
+}
+
+func rewriteCapabilityStatementURL(body []byte, proxyURL string) []byte {
+	var cs map[string]interface{}
+	if err := json.Unmarshal(body, &cs); err != nil {
+		return body
+	}
+	cs["url"] = proxyURL
+	if impl, ok := cs["implementation"].(map[string]interface{}); ok {
+		impl["url"] = proxyURL
+	} else {
+		cs["implementation"] = map[string]interface{}{
+			"url":         proxyURL,
+			"description": "FHIR Privacy Proxy",
+		}
+	}
+	rewritten, err := json.Marshal(cs)
+	if err != nil {
+		return body
+	}
+	return rewritten
 }
 
 // extractResourceType extracts the FHIR resource type from the request path.

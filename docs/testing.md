@@ -23,10 +23,28 @@ Expected:
 - admin → all fields VISIBLE
 - nurse + break-glass → full access, audited as BREAK_GLASS
 
-### Swapping upstream to the public HAPI sandbox
+### Automated public HAPI smoke test
 
-Point the proxy at `http://hapi.fhir.org/baseR4` instead of the bundled
-container:
+Run the proxy against the public HAPI FHIR sandbox with a single
+command:
+
+```bash
+make test-public
+```
+
+This target:
+1. Starts the stack with `FHIR_UPSTREAM=http://hapi.fhir.org/baseR4`
+2. Waits for the proxy and Keycloak to become healthy
+3. Runs `scripts/public_api_smoke.sh`, which:
+   - Verifies the unauthenticated `/fhir/r4/metadata` endpoint
+   - Fetches 5 real Patient IDs from the public HAPI server
+   - Queries each patient through the proxy as nurse, doctor, and admin
+   - Asserts correct field-level redaction per role
+   - Prints a comparison table and pass/fail summary
+
+### Manual upstream swap
+
+To point the proxy at `http://hapi.fhir.org/baseR4` manually:
 
 ```bash
 # In deployments/docker/docker-compose.yml (proxy service env)
@@ -116,10 +134,13 @@ Authorize URL:    http://localhost:8180/realms/hospital-a/protocol/openid-connec
 JWKS URL:         http://localhost:8180/realms/hospital-a/protocol/openid-connect/certs
 ```
 
-The proxy should pass the baseline "SMART v1 bearer token" tests. Any
-capability-statement probes may 404 because the proxy only serves
-`/fhir/r4/{ResourceType}` — whitelist those paths or point Inferno at
-the upstream HAPI directly for capability checks.
+The proxy exposes `/fhir/r4/metadata` without authentication (required
+by FHIR and SMART specs). This endpoint proxies the upstream
+CapabilityStatement and rewrites `implementation.url` to point at the
+proxy. Inferno's capability-statement probes will pass without any
+workaround.
+
+See `scripts/inferno_config.md` for a step-by-step Inferno setup guide.
 
 ## Phase 5 — Break-glass forensic replay
 
