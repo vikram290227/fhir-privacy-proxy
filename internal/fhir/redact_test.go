@@ -37,6 +37,39 @@ func TestApplyRedactions_RemoveField(t *testing.T) {
 	}
 }
 
+func TestDeleteAtPath_ArrayElements(t *testing.T) {
+	resource := map[string]any{
+		"name": []any{
+			map[string]any{"family": "Smith", "given": []any{"John"}},
+			map[string]any{"family": "Doe", "given": []any{"Jane"}},
+		},
+	}
+	deleteAtPath(resource, []string{"name", "family"})
+	names := resource["name"].([]any)
+	for _, n := range names {
+		nm := n.(map[string]any)
+		if _, exists := nm["family"]; exists {
+			t.Error("family should be deleted from all array elements")
+		}
+	}
+}
+
+func TestDeleteAtPath_MissingKey(t *testing.T) {
+	resource := map[string]any{"id": "123"}
+	deleteAtPath(resource, []string{"nonexistent", "nested"})
+	if resource["id"] != "123" {
+		t.Error("existing fields should be unaffected")
+	}
+}
+
+func TestDeleteAtPath_EmptyParts(t *testing.T) {
+	resource := map[string]any{"id": "123"}
+	deleteAtPath(resource, []string{})
+	if resource["id"] != "123" {
+		t.Error("empty path should be a no-op")
+	}
+}
+
 func TestApplyRedactions_MaskField(t *testing.T) {
 	input := `{"resourceType":"Patient","id":"123","telecom":[{"system":"phone","value":"555-1234"}]}`
 	out, err := ApplyRedactions([]byte(input), nil, []string{"telecom"})
@@ -156,6 +189,95 @@ func TestApplyRedactions_InvalidJSON(t *testing.T) {
 	_, err := ApplyRedactions([]byte("not json"), []string{"id"}, nil)
 	if err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestApplyRedactions_EmptyStringPaths(t *testing.T) {
+	input := `{"resourceType":"Patient","id":"123","name":[{"family":"Smith"}]}`
+	out, err := ApplyRedactions([]byte(input), []string{""}, []string{""})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]any
+	json.Unmarshal(out, &result)
+	if result["id"] != "123" {
+		t.Error("empty path should be no-op; id should remain")
+	}
+}
+
+func TestApplyRedactions_Bundle_NonArrayEntry(t *testing.T) {
+	// entry is a string, not an array — should be a no-op
+	input := `{"resourceType":"Bundle","entry":"not-an-array","identifier":[{"value":"X"}]}`
+	out, err := ApplyRedactions([]byte(input), []string{"identifier"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]any
+	json.Unmarshal(out, &result)
+	// Since entry is not []any, redactAny returns early — identifier on Bundle itself stays
+	if result["resourceType"] != "Bundle" {
+		t.Error("resourceType should be Bundle")
+	}
+}
+
+func TestApplyRedactions_Bundle_NonMapEntryElement(t *testing.T) {
+	// entry contains a non-map element — should be skipped
+	input := `{"resourceType":"Bundle","entry":["not-a-map",{"resource":{"resourceType":"Patient","id":"1","identifier":[{"value":"A"}]}}]}`
+	out, err := ApplyRedactions([]byte(input), []string{"identifier"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]any
+	json.Unmarshal(out, &result)
+	entries := result["entry"].([]any)
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(entries))
+	}
+}
+
+func TestRedactAny_Nil(t *testing.T) {
+	// Should be a no-op and not panic.
+	redactAny(nil, []string{"id"}, nil)
+}
+
+func TestDeleteAtPath_NestedMap(t *testing.T) {
+	resource := map[string]any{
+		"meta": map[string]any{"versionId": "1", "lastUpdated": "2024-01-01"},
+	}
+	deleteAtPath(resource, []string{"meta", "versionId"})
+	meta := resource["meta"].(map[string]any)
+	if _, exists := meta["versionId"]; exists {
+		t.Error("versionId should be deleted from nested map")
+	}
+	if meta["lastUpdated"] != "2024-01-01" {
+		t.Error("lastUpdated should remain")
+	}
+}
+
+func TestMaskAtPath_EmptyParts(t *testing.T) {
+	resource := map[string]any{"id": "123"}
+	maskAtPath(resource, []string{})
+	if resource["id"] != "123" {
+		t.Error("empty parts should be a no-op")
+	}
+}
+
+func TestMaskAtPath_MissingKey(t *testing.T) {
+	resource := map[string]any{"id": "123"}
+	maskAtPath(resource, []string{"nonexistent", "nested"})
+	if resource["id"] != "123" {
+		t.Error("existing fields should be unaffected")
+	}
+}
+
+func TestMaskAtPath_NestedMap(t *testing.T) {
+	resource := map[string]any{
+		"meta": map[string]any{"versionId": "1"},
+	}
+	maskAtPath(resource, []string{"meta", "versionId"})
+	meta := resource["meta"].(map[string]any)
+	if meta["versionId"] != redactedValue {
+		t.Errorf("nested versionId should be masked, got %v", meta["versionId"])
 	}
 }
 

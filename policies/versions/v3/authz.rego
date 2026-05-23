@@ -7,7 +7,7 @@
 # 18 Safe Harbor elements). v2 only masked it under elevated risk;
 # v3 makes it masked by default for the nurse role, bringing the
 # de-identification posture closer to minimum-necessary.
-package authz
+package authz_v3
 
 import future.keywords.if
 import future.keywords.in

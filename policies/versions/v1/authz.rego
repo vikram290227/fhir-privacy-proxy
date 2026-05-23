@@ -1,7 +1,7 @@
 # Snapshot: policies/versions/v1 — the original static RBAC policy.
 # This version is kept on disk so the policyversion manager can roll
 # back to it if v2 (risk-aware) causes operational issues.
-package authz
+package authz_v1
 
 import future.keywords.if
 import future.keywords.in

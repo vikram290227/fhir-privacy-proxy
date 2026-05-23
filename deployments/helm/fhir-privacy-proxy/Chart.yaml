@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fhir-privacy-proxy
+description: FHIR Privacy Proxy — JWT-authenticated, OPA-enforced, consent-aware FHIR gateway
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

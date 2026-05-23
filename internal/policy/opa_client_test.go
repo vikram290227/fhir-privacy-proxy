@@ -12,7 +12,7 @@ import (
 
 func TestOPAClient_Evaluate_Allow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/data/authz/decision" {
+		if r.URL.Path != "/v1/data/firewall/decision/result" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Method != http.MethodPost {

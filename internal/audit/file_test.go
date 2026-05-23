@@ -123,6 +123,34 @@ func TestFileLogger_MissingPath(t *testing.T) {
 	}
 }
 
+func TestFileLogger_Path(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.ndjson")
+	fl, err := NewFileLogger(path, nil)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	defer fl.Close()
+	if fl.Path() != path {
+		t.Errorf("Path() = %q, want %q", fl.Path(), path)
+	}
+}
+
+func TestFileLogger_Close_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.ndjson")
+	fl, err := NewFileLogger(path, nil)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	if err := fl.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := fl.Close(); err != nil {
+		t.Errorf("second Close should be a no-op, got: %v", err)
+	}
+}
+
 func TestFileLoggerPath_Env(t *testing.T) {
 	t.Setenv("AUDIT_LOG_FILE", "/var/log/audit.ndjson")
 	if got := FileLoggerPath(); got != "/var/log/audit.ndjson" {

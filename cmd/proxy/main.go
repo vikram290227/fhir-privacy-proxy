@@ -162,6 +162,16 @@ func main() {
 			zap.String("active", policyMgr.Active()))
 	}
 
+	// Upstream FHIR base URL — resolved early so health/ready and FHIR
+	// routes can all share the same value.
+	fhirUpstream := os.Getenv("FHIR_UPSTREAM")
+	if fhirUpstream == "" {
+		fhirUpstream = "http://localhost:8090/fhir"
+	}
+	fhirUpstream = strings.TrimRight(fhirUpstream, "/")
+
+	upstreamClient := &http.Client{Timeout: 30 * time.Second}
+
 	// Setup router
 	r := chi.NewRouter()
 
@@ -179,6 +189,31 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Liveness: is the process running?
+	r.Get("/health/live", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "live"})
+	})
+
+	// Readiness: can we serve traffic?
+	r.Get("/health/ready", func(w http.ResponseWriter, r *http.Request) {
+		deps := checkDependencies(r.Context(), opaURL, revocationCache, fhirUpstream, upstreamClient)
+		allOK := true
+		for _, d := range deps {
+			if d.Status == "error" {
+				allOK = false
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if allOK {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"dependencies": deps})
+	})
+
 	// Prometheus metrics endpoint
 	r.Handle("/metrics", metrics.Handler())
 
@@ -186,15 +221,6 @@ func main() {
 	if revocationCache != nil {
 		r.Post("/webhook/revoke", revocationCache.HandleWebhook)
 	}
-
-	// Upstream FHIR base URL is needed by the router setup *and* by
-	// the admin /health/deps probe. Resolve it here so both can share
-	// the same value.
-	fhirUpstream := os.Getenv("FHIR_UPSTREAM")
-	if fhirUpstream == "" {
-		fhirUpstream = "http://localhost:8090/fhir"
-	}
-	fhirUpstream = strings.TrimRight(fhirUpstream, "/")
 
 	// Optional risk scoring client — enabled when RISK_SERVICE_URL is set.
 	riskServiceURL := os.Getenv("RISK_SERVICE_URL")
@@ -249,8 +275,6 @@ func main() {
 	} else {
 		logger.Info("ADMIN_API_KEY not set, admin API disabled")
 	}
-
-	upstreamClient := &http.Client{Timeout: 30 * time.Second}
 
 	// Unauthenticated metadata endpoint — SMART-on-FHIR and Inferno
 	// require /metadata to be accessible without a bearer token.
@@ -495,6 +519,60 @@ func rewriteCapabilityStatementURL(body []byte, proxyURL string) []byte {
 		return body
 	}
 	return rewritten
+}
+
+type depStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+func checkDependencies(ctx context.Context, opaURL string, rc *cache.RevocationCache, fhirUpstream string, client *http.Client) []depStatus {
+	deps := make([]depStatus, 0, 3)
+
+	// OPA
+	opaStatus := "ok"
+	req, err := http.NewRequestWithContext(ctx, "GET", opaURL+"/health", nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err != nil || resp.StatusCode >= 400 {
+			opaStatus = "error"
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	} else {
+		opaStatus = "error"
+	}
+	deps = append(deps, depStatus{Name: "opa", Status: opaStatus})
+
+	// Redis
+	redisStatus := "ok"
+	if rc != nil {
+		if err := rc.Ping(ctx); err != nil {
+			redisStatus = "error"
+		}
+	} else {
+		redisStatus = "disabled"
+	}
+	deps = append(deps, depStatus{Name: "redis", Status: redisStatus})
+
+	// FHIR upstream
+	fhirStatus := "ok"
+	req, err = http.NewRequestWithContext(ctx, "GET", fhirUpstream+"/metadata", nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err != nil || resp.StatusCode >= 400 {
+			fhirStatus = "error"
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	} else {
+		fhirStatus = "error"
+	}
+	deps = append(deps, depStatus{Name: "fhir", Status: fhirStatus})
+
+	return deps
 }
 
 // extractResourceType extracts the FHIR resource type from the request path.

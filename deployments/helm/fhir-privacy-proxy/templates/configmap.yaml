@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fhir-privacy-proxy.fullname" . }}-config
+  labels:
+    {{- include "fhir-privacy-proxy.labels" . | nindent 4 }}
+data:
+  OPA_URL: {{ .Values.env.OPA_URL | quote }}
+  FHIR_UPSTREAM: {{ .Values.env.FHIR_UPSTREAM | quote }}
+  REDIS_ADDR: {{ .Values.env.REDIS_ADDR | quote }}
+  RISK_SERVICE_URL: {{ .Values.env.RISK_SERVICE_URL | quote }}

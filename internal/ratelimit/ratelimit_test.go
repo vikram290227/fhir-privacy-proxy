@@ -318,6 +318,75 @@ func TestHeadersContainLimits(t *testing.T) {
 	}
 }
 
+func TestNew_And_Ping_And_Close(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	l := New(mr.Addr(), zap.NewNop())
+	if l == nil {
+		t.Fatal("expected non-nil Limiter from New")
+	}
+	if err := l.Ping(context.Background()); err != nil {
+		t.Errorf("Ping to miniredis: %v", err)
+	}
+	// Call Allow to exercise the default timeNow() → time.Now() branch
+	d, err := l.Allow(context.Background(), "tenant", "subject", 100, 1000)
+	if err != nil {
+		t.Errorf("Allow: %v", err)
+	}
+	if !d.Allowed {
+		t.Error("expected allowed for first request")
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestClose_NilRedis(t *testing.T) {
+	l := &Limiter{}
+	if err := l.Close(); err != nil {
+		t.Errorf("Close nil redis: %v", err)
+	}
+}
+
+func TestToInt64(t *testing.T) {
+	cases := []struct {
+		in   any
+		want int64
+		ok   bool
+	}{
+		{int64(42), 42, true},
+		{int(7), 7, true},
+		{float64(3.0), 3, true},
+		{"99", 99, true},
+		{"bad", 0, false},
+		{nil, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := toInt64(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("toInt64(%v) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	now := time.Unix(1000, 0)
+	// zero oldest → floor of 1s
+	if d := retryAfter(0, time.Minute, now); d != time.Second {
+		t.Errorf("zero oldest: got %v want 1s", d)
+	}
+	// oldest so recent that remaining < 1s → floor
+	nearPast := now.Add(-59 * time.Second).UnixNano()
+	if d := retryAfter(nearPast, time.Minute, now); d < time.Second {
+		t.Errorf("near-floor: got %v, want >= 1s", d)
+	}
+	// oldest far enough that wait > 1s
+	oldPast := now.Add(-30 * time.Second).UnixNano()
+	if d := retryAfter(oldPast, time.Minute, now); d <= time.Second {
+		t.Errorf("normal case: got %v, want > 1s", d)
+	}
+}
+
 // TestMissingTenantOrSubject validates the input guard.
 func TestMissingTenantOrSubject(t *testing.T) {
 	limiter, _, _, cleanup := newTestLimiter(t)

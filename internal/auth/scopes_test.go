@@ -194,3 +194,43 @@ func TestRequireSmartScope_MissingContext(t *testing.T) {
 		t.Errorf("expected 500, got %d", w.Code)
 	}
 }
+
+func TestScopeCovers_InvalidLevel(t *testing.T) {
+	if scopeCovers("admin/Patient.read", "Patient", "read") {
+		t.Error("expected false for unsupported level 'admin'")
+	}
+}
+
+func TestActionMatches_V2Granular_UnknownNeed(t *testing.T) {
+	if actionMatches("rs", "delete") {
+		t.Error("expected false for v2 granular with unknown need 'delete'")
+	}
+}
+
+func TestIsV2Granular_EmptyString(t *testing.T) {
+	if isV2Granular("") {
+		t.Error("expected false for empty string")
+	}
+}
+
+func TestRequireSmartScope_MethodNotAllowed(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(nil, logger)
+
+	handler := m.RequireSmartScope(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for unsupported method")
+	}))
+
+	req := httptest.NewRequest("CONNECT", "/fhir/r4/Patient/1", nil)
+	ctx := context.WithValue(req.Context(), SubjectContextKey, &SubjectContext{
+		SubjectID: "nurse1",
+		Scopes:    []string{"patient/Patient.read"},
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}

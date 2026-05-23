@@ -89,7 +89,7 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 		return nil, fmt.Errorf("marshaling OPA input: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/v1/data/authz/decision", c.baseURL)
+	url := fmt.Sprintf("%s/v1/data/firewall/decision/result", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating OPA request: %w", err)

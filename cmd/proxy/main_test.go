@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/vikram290227/fhir-privacy-proxy/internal/audit"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/auth"
 	"go.uber.org/zap"
 )
@@ -372,6 +373,135 @@ func TestRewriteCapabilityStatementURL_InvalidJSON(t *testing.T) {
 	result := rewriteCapabilityStatementURL(input, "http://proxy/fhir/r4")
 	if string(result) != "not json" {
 		t.Errorf("expected invalid JSON to pass through unchanged")
+	}
+}
+
+type mockAuditSink struct {
+	events []audit.AuditEvent
+}
+
+func (m *mockAuditSink) Log(e audit.AuditEvent) { m.events = append(m.events, e) }
+
+func TestMetadataProxyHandler_HTTPSScheme(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"resourceType": "CapabilityStatement",
+			"implementation": map[string]interface{}{
+				"url":         "http://old-server/fhir/r4",
+				"description": "Old",
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	handler := metadataProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t))
+	req := httptest.NewRequest("GET", "/fhir/r4/metadata", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Host = "proxy:8080"
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&result)
+	impl := result["implementation"].(map[string]interface{})
+	if impl["url"] != "https://proxy:8080/fhir/r4" {
+		t.Errorf("expected https URL, got %v", impl["url"])
+	}
+}
+
+func TestFhirProxyHandler_AuditLogger_BreakGlass(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"resourceType": "Patient", "id": "123"})
+	}))
+	defer upstream.Close()
+
+	sink := &mockAuditSink{}
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), sink)
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
+	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
+		SubjectID: "nurse1",
+		TenantID:  "hospital-a",
+		BreakGlass: &auth.BreakGlassContext{
+			Enabled:       true,
+			Justification: "Emergency",
+			RequestedBy:   "nurse1",
+		},
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(sink.events))
+	}
+	if sink.events[0].EventType != audit.EventBreakGlass {
+		t.Errorf("expected BREAK_GLASS event, got %v", sink.events[0].EventType)
+	}
+}
+
+func TestFhirProxyHandler_AuditLogger_WithRedaction(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"resourceType": "Patient", "id": "1",
+			"identifier": []map[string]string{{"value": "MRN"}},
+		})
+	}))
+	defer upstream.Close()
+
+	sink := &mockAuditSink{}
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), sink)
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
+		SubjectID: "nurse1",
+		TenantID:  "hospital-a",
+		Policy:    &auth.PolicyDecision{Remove: []string{"identifier"}},
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(sink.events) != 1 || len(sink.events[0].RedactedPaths) == 0 {
+		t.Errorf("expected audit event with redacted paths, got: %+v", sink.events)
+	}
+}
+
+func TestFhirProxyHandler_MalformedJSON_Passthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not valid json"))
+	}))
+	defer upstream.Close()
+
+	handler := fhirProxyHandler(upstream.URL+"/fhir", http.DefaultClient, mustLogger(t), nil)
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	ctx := context.WithValue(req.Context(), auth.SubjectContextKey, &auth.SubjectContext{
+		SubjectID: "nurse1",
+		Policy:    &auth.PolicyDecision{Remove: []string{"id"}},
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 passthrough for malformed JSON, got %d", w.Code)
+	}
+	if w.Body.String() != "not valid json" {
+		t.Errorf("expected raw body passthrough, got: %s", w.Body.String())
 	}
 }
 

@@ -27,6 +27,24 @@ func TestTracer(t *testing.T) {
 	}
 }
 
+func TestInit_WithOTLPEndpoint(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4318")
+	shutdown := Init()
+	if shutdown == nil {
+		t.Error("expected non-nil shutdown")
+	}
+	_ = shutdown(context.Background())
+}
+
+func TestInit_WithHTTPEndpoint(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+	shutdown := Init()
+	if shutdown == nil {
+		t.Error("expected non-nil shutdown")
+	}
+	_ = shutdown(context.Background())
+}
+
 func TestMiddleware(t *testing.T) {
 	_ = Init()
 

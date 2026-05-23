@@ -2,11 +2,15 @@ package cache
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -14,6 +18,56 @@ func newTestCache(t *testing.T) *RevocationCache {
 	t.Helper()
 	logger, _ := zap.NewDevelopment()
 	return NewRevocationCache("localhost:1", logger)
+}
+
+func newMiniredisCache(t *testing.T) (*RevocationCache, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	logger, _ := zap.NewDevelopment()
+	rc := &RevocationCache{redis: rdb, logger: logger}
+	t.Cleanup(func() { _ = rdb.Close() })
+	return rc, mr
+}
+
+func TestPing_OK(t *testing.T) {
+	rc, _ := newMiniredisCache(t)
+	if err := rc.Ping(context.Background()); err != nil {
+		t.Errorf("expected nil from Ping, got: %v", err)
+	}
+}
+
+func TestPing_Unreachable(t *testing.T) {
+	rc := newTestCache(t)
+	if err := rc.Ping(context.Background()); err == nil {
+		t.Error("expected error from unreachable Redis")
+	}
+}
+
+func TestIsRevoked_NotRevoked(t *testing.T) {
+	rc, _ := newMiniredisCache(t)
+	revoked, err := rc.IsRevoked("hospital-a", "tok-1", time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if revoked {
+		t.Error("expected not revoked for missing key")
+	}
+}
+
+func TestIsRevoked_Revoked(t *testing.T) {
+	rc, _ := newMiniredisCache(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	if err := rc.Revoke("hospital-a", "tok-2", exp); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	revoked, err := rc.IsRevoked("hospital-a", "tok-2", exp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !revoked {
+		t.Error("expected revoked after Revoke()")
+	}
 }
 
 func TestHandleWebhook_ValidRevocation(t *testing.T) {

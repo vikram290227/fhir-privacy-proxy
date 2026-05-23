@@ -219,6 +219,33 @@ func TestJWTValidation_InvalidSignature(t *testing.T) {
 	}
 }
 
+// TestJWTValidation_JWKSCacheHit verifies the JWKS is reused from
+// cache on the second call (covers the cache-hit branch in getJWKS).
+func TestJWTValidation_JWKSCacheHit(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer,
+		"sub": "nurse1",
+		"aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+		"jti": "cache-test",
+	})
+
+	if _, _, err := m.validateJWT(token); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if _, _, err := m.validateJWT(token); err != nil {
+		t.Fatalf("second call (cache hit): %v", err)
+	}
+}
+
 // TestJWTValidation_Valid verifies a well-formed token signed with
 // the trusted key is accepted and the claims are returned.
 func TestJWTValidation_Valid(t *testing.T) {

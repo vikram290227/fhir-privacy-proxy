@@ -1,12 +1,5 @@
+# This file is intentionally empty.
+# All policy logic lives in authz.rego under package firewall.decision.
+# Kept as a placeholder so the policyversion manager can track the base/
+# directory without errors.
 package firewall.decision
-
-import data.authz
-
-# Re-export the authz decision so legacy queries to
-# /v1/data/firewall/decision still work.
-allow := authz.decision.allow
-remove := authz.decision.remove
-mask := authz.decision.mask
-reason := authz.decision.reason
-
-result := authz.decision

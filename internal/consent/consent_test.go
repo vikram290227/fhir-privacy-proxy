@@ -242,6 +242,53 @@ func TestLookup_RejectedConsent(t *testing.T) {
 	}
 }
 
+func TestLookup_Unreachable(t *testing.T) {
+	checker, err := NewChecker("http://localhost:1", zap.NewNop(), 100, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = checker.Lookup(context.Background(), "p1", "TREATMENT")
+	if err == nil {
+		t.Error("expected error on unreachable server")
+	}
+}
+
+func TestLookup_InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	checker, err := NewChecker(srv.URL, zap.NewNop(), 100, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = checker.Lookup(context.Background(), "p1", "TREATMENT")
+	if err == nil {
+		t.Error("expected error for invalid JSON response")
+	}
+}
+
+func TestLookup_InvalidConsentEntry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"entry":[{"resource": "not-a-json-object"}]}`))
+	}))
+	defer srv.Close()
+
+	checker, err := NewChecker(srv.URL, zap.NewNop(), 100, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = checker.Lookup(context.Background(), "p1", "TREATMENT")
+	if err == nil {
+		t.Error("expected error for invalid consent resource JSON")
+	}
+}
+
 func TestValidPurposes(t *testing.T) {
 	expected := []string{"TREATMENT", "PAYMENT", "OPERATIONS", "EMERGENCY", "RESEARCH"}
 	for _, p := range expected {

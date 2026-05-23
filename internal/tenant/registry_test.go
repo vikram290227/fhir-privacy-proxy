@@ -131,3 +131,44 @@ func TestLoadRegistry_DefaultTokenTTL(t *testing.T) {
 		t.Errorf("expected default 15m TTL, got %v", cfg.TokenTTL)
 	}
 }
+
+func TestGetByID_Found(t *testing.T) {
+	yaml := `tenants:
+  - issuer_url: "http://test"
+    tenant_id: "test-tenant"
+    jwks_endpoint: "http://test/jwks"
+    audience: "test"
+    policy_bundle: "test"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenants.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+	reg, err := LoadRegistry(path)
+	if err != nil {
+		t.Fatalf("LoadRegistry: %v", err)
+	}
+	cfg, err := reg.GetByID("test-tenant")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TenantID != "test-tenant" {
+		t.Errorf("expected test-tenant, got %s", cfg.TenantID)
+	}
+}
+
+func TestGetByID_NotFound(t *testing.T) {
+	yaml := `tenants:
+  - issuer_url: "http://test"
+    tenant_id: "test-tenant"
+    jwks_endpoint: "http://test/jwks"
+    audience: "test"
+    policy_bundle: "test"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenants.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+	reg, _ := LoadRegistry(path)
+	if _, err := reg.GetByID("unknown"); err == nil {
+		t.Error("expected error for unknown tenant ID")
+	}
+}

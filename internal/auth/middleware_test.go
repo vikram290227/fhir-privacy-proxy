@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/policy"
 	"github.com/vikram290227/fhir-privacy-proxy/internal/tenant"
 	"go.uber.org/zap"
@@ -180,6 +181,34 @@ func TestEnforcePolicy_MissingContext(t *testing.T) {
 
 	if w.Code != 500 {
 		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestEnforcePolicy_OPAError(t *testing.T) {
+	opaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer opaServer.Close()
+
+	logger, _ := zap.NewDevelopment()
+	m := &Middleware{logger: logger}
+	opaClient := policy.NewOPAClient(opaServer.URL, logger)
+
+	handler := m.EnforcePolicy(opaClient)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called when OPA returns error")
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/123", nil)
+	ctx := context.WithValue(req.Context(), SubjectContextKey, &SubjectContext{
+		SubjectID: "nurse1",
+		TenantID:  "hospital-a",
+	})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on OPA error, got %d", w.Code)
 	}
 }
 
@@ -460,6 +489,166 @@ func TestBuildSubjectContext_DefaultFHIRContext(t *testing.T) {
 	}
 	if ctx.FHIRContext.Facility != "main-hospital" {
 		t.Errorf("expected default facility main-hospital, got %s", ctx.FHIRContext.Facility)
+	}
+}
+
+type mockRevocationChecker struct {
+	revoked bool
+	err     error
+}
+
+func (m *mockRevocationChecker) IsRevoked(_, _ string, _ int64) (bool, error) {
+	return m.revoked, m.err
+}
+
+func TestValidateToken_ValidJWT_PassThrough(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer, "sub": "nurse1", "aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "jti": "tok-1",
+		"realm_access": map[string]interface{}{"roles": []interface{}{"nurse"}},
+		"fhirContext":  map[string]interface{}{"department": "cardiology", "role": "nurse"},
+		"scope":        "patient/Patient.read",
+	})
+
+	called := false
+	handler := m.ValidateToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		sub := r.Context().Value(SubjectContextKey).(*SubjectContext)
+		if sub.SubjectID != "nurse1" {
+			t.Errorf("expected subject nurse1, got %s", sub.SubjectID)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !called {
+		t.Error("next handler should be called for valid token")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestValidateToken_RevokedToken(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+	m.SetRevocationChecker(&mockRevocationChecker{revoked: true})
+
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer, "sub": "nurse1", "aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "jti": "tok-revoked",
+		"scope": "patient/Patient.read",
+	})
+
+	handler := m.ValidateToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for revoked token")
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for revoked token, got %d", w.Code)
+	}
+}
+
+func TestValidateToken_RevocationCheckError_FailOpen(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+	m.SetRevocationChecker(&mockRevocationChecker{err: context.DeadlineExceeded})
+
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer, "sub": "nurse1", "aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "jti": "tok-err",
+		"scope": "patient/Patient.read",
+	})
+
+	called := false
+	handler := m.ValidateToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !called {
+		t.Error("next handler should be called when revocation check errors (fail-open)")
+	}
+}
+
+func TestValidateToken_InvalidClaims_MissingSub(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+
+	// Token with no "sub" claim — buildSubjectContext should fail.
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer, "aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+		"scope": "patient/Patient.read",
+	})
+
+	handler := m.ValidateToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for missing sub")
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing sub, got %d", w.Code)
+	}
+}
+
+func TestValidateToken_InsufficientScope(t *testing.T) {
+	h := newJWTHelper(t)
+	defer h.close()
+	reg := buildRegistry(t, h)
+	logger, _ := zap.NewDevelopment()
+	m := NewMiddleware(reg, logger)
+
+	token := h.sign(t, jwt.MapClaims{
+		"iss": h.issuer, "sub": "nurse1", "aud": h.audience,
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "jti": "tok-2",
+		"scope": "admin/all",
+	})
+
+	handler := m.ValidateToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for insufficient scope")
+	}))
+
+	req := httptest.NewRequest("GET", "/fhir/r4/Patient/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for insufficient scope, got %d", w.Code)
 	}
 }
 

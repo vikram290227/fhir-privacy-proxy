@@ -598,6 +598,110 @@ func TestInstrumentMiddleware_UsesRoutePattern(t *testing.T) {
 	}
 }
 
+func TestNew_NilLogger(t *testing.T) {
+	s := New(testAPIKey, Deps{}, nil)
+	if s == nil {
+		t.Error("expected non-nil server with nil logger")
+	}
+}
+
+func TestInstrument_UnknownRoute(t *testing.T) {
+	srv := newServerForTest(t, Deps{})
+	req := httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	req.Header.Set("X-Admin-Key", testAPIKey)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown route, got %d", rec.Code)
+	}
+}
+
+func TestReadJSON_InvalidBody(t *testing.T) {
+	pm := &fakePolicyManager{active: "v1", bundles: []Bundle{{Version: "v1", Path: "/x"}}}
+	srv := newServerForTest(t, Deps{Policy: pm})
+	req := httptest.NewRequest(http.MethodPost, "/policy/activate",
+		strings.NewReader("{invalid json!!!}"))
+	req.Header.Set("X-Admin-Key", testAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid JSON body, got %d", rec.Code)
+	}
+}
+
+func TestRouter_NonNil(t *testing.T) {
+	s := newServerForTest(t, Deps{})
+	if s.Router() == nil {
+		t.Error("expected non-nil router")
+	}
+}
+
+func TestAuditTail_EmptyPath(t *testing.T) {
+	srv := newServerForTest(t, Deps{Audit: &fakeAuditTailer{path: ""}})
+	rec := adminRequest(t, srv, http.MethodGet, "/audit/tail", nil, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for empty audit path, got %d", rec.Code)
+	}
+}
+
+func TestAuditTail_N_ExceedsMax(t *testing.T) {
+	path := writeTinyAudit(t)
+	srv := newServerForTest(t, Deps{Audit: &fakeAuditTailer{path: path}})
+	rec := adminRequest(t, srv, http.MethodGet, "/audit/tail?n=9999", nil, true)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 when n exceeds max (should be capped), got %d", rec.Code)
+	}
+}
+
+func TestListTenants_NoTenantRegistry(t *testing.T) {
+	srv := newServerForTest(t, Deps{})
+	rec := adminRequest(t, srv, http.MethodGet, "/tenants", nil, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when no tenant registry, got %d", rec.Code)
+	}
+}
+
+func TestActivate_NoPolicyManager(t *testing.T) {
+	srv := newServerForTest(t, Deps{})
+	rec := adminRequest(t, srv, http.MethodPost, "/policy/activate",
+		strings.NewReader(`{"version":"v1"}`), true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestRollback_NoPolicyManager(t *testing.T) {
+	srv := newServerForTest(t, Deps{})
+	rec := adminRequest(t, srv, http.MethodPost, "/policy/rollback", nil, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestActivate_InvalidJSON(t *testing.T) {
+	pm := &fakePolicyManager{active: "v1", bundles: []Bundle{{Version: "v1", Path: "/x"}}}
+	srv := newServerForTest(t, Deps{Policy: pm})
+	rec := adminRequest(t, srv, http.MethodPost, "/policy/activate",
+		strings.NewReader("{bad json}"), true)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid JSON, got %d", rec.Code)
+	}
+}
+
+func TestStatusRecorder_WriteAutoSets200(t *testing.T) {
+	inner := httptest.NewRecorder()
+	sr := &statusRecorder{ResponseWriter: inner}
+	// Write without calling WriteHeader first — should auto-set status=200
+	_, err := sr.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if sr.status != http.StatusOK {
+		t.Errorf("expected status=200, got %d", sr.status)
+	}
+}
+
 func writeTinyAudit(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
