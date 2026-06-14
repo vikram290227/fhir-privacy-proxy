@@ -1,0 +1,27 @@
+{
+  "subject": {
+    "has_roles": true,
+    "roles": ["nurse", "can_break_glass"],
+    "fhir_context": {
+      "department": "cardiology",
+      "role": "nurse",
+      "facility": "main-hospital"
+    },
+    "break_glass": {
+      "enabled": true,
+      "justification": "Emergency trauma patient arrived unconscious",
+      "requested_by": "nurse1"
+    },
+    "tenant_id": "hospital-a",
+    "purpose_of_use": "EMERGENCY"
+  },
+  "resource": {
+    "type": "Patient",
+    "patient_id": "patient-sensitive-1"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/fhir/r4/Patient/patient-sensitive-1",
+    "path_parts": ["Patient", "patient-sensitive-1"]
+  }
+}

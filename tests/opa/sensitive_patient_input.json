@@ -1,0 +1,23 @@
+{
+  "subject": {
+    "has_roles": true,
+    "roles": ["nurse"],
+    "fhir_context": {
+      "department": "cardiology",
+      "role": "nurse",
+      "facility": "main-hospital"
+    },
+    "break_glass": {"enabled": false},
+    "tenant_id": "hospital-a",
+    "purpose_of_use": "TREATMENT"
+  },
+  "resource": {
+    "type": "Patient",
+    "patient_id": "sensitive-patient-001"
+  },
+  "request": {
+    "method": "GET",
+    "path": "/fhir/r4/Patient/sensitive-patient-001",
+    "path_parts": ["Patient", "sensitive-patient-001"]
+  }
+}
