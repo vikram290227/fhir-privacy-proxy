@@ -3,6 +3,7 @@ package fhir
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -20,7 +21,22 @@ const redactedValue = "***REDACTED***"
 //
 // Returns the modified JSON bytes. If remove and mask are both empty the
 // original bytes are returned unchanged.
+// ApplyRedactions dispatches to RedactStream (default) or the legacy
+// map-based implementation, selected by REDACTION_ENGINE=stream|map.
+// Set REDACTION_ENGINE=map during rollout to A/B benchmark both engines
+// against the same fixture; revert to "stream" once validated.
 func ApplyRedactions(jsonBytes []byte, remove, mask []string) ([]byte, error) {
+	if os.Getenv("REDACTION_ENGINE") == "map" {
+		return redactMapBased(jsonBytes, remove, mask)
+	}
+	return RedactStream(jsonBytes, remove, mask)
+}
+
+// redactMapBased is the original full-deserialise implementation kept as a
+// fallback reference behind REDACTION_ENGINE=map. It allocates a full
+// map[string]any tree (~164 MB at 15 MB input) which is the dominant cost
+// at the p50 target bundle sizes.
+func redactMapBased(jsonBytes []byte, remove, mask []string) ([]byte, error) {
 	if len(remove) == 0 && len(mask) == 0 {
 		return jsonBytes, nil
 	}

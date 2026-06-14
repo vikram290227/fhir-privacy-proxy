@@ -33,14 +33,28 @@ var ValidPurposes = map[string]bool{
 	"RESEARCH":   true,
 }
 
+// ConsentCoding is one coding within a FHIR CodeableConcept.
+type ConsentCoding struct {
+	System string `json:"system,omitempty"`
+	Code   string `json:"code"`
+}
+
+// ConsentPurpose wraps one purpose entry as a CodeableConcept so OPA can
+// iterate `some coding in concept.coding` and match `coding.code`. Preserving
+// the nested structure avoids a flat-string comparison that silently fails
+// against real INTEROPen CareConnect / NHS consent profiles.
+type ConsentPurpose struct {
+	Coding []ConsentCoding `json:"coding"`
+}
+
 // ConsentInfo is the subset of a FHIR Consent resource the OPA
 // policy needs to make an allow/deny decision. It is serialised as
 // `input.resource.consent` in the OPA input.
 type ConsentInfo struct {
-	Status          string   `json:"status"`
-	Scope           string   `json:"scope"`
-	AllowedPurposes []string `json:"allowed_purposes"`
-	ProvisionType   string   `json:"provision_type"`
+	Status          string           `json:"status"`
+	Scope           string           `json:"scope"`
+	AllowedPurposes []ConsentPurpose `json:"allowed_purposes"`
+	ProvisionType   string           `json:"provision_type"`
 }
 
 // cacheEntry wraps a ConsentInfo with a wall-clock deadline so
@@ -142,7 +156,8 @@ type fhirConsent struct {
 	Provision struct {
 		Type    string `json:"type"`
 		Purpose []struct {
-			Code string `json:"code"`
+			System string `json:"system"`
+			Code   string `json:"code"`
 		} `json:"purpose"`
 	} `json:"provision"`
 }
@@ -189,10 +204,12 @@ func (c *Checker) queryFHIR(ctx context.Context, patientID string) (*ConsentInfo
 		scope = consent.Scope.Coding[0].Code
 	}
 
-	var purposes []string
+	var purposes []ConsentPurpose
 	for _, p := range consent.Provision.Purpose {
 		if p.Code != "" {
-			purposes = append(purposes, p.Code)
+			purposes = append(purposes, ConsentPurpose{
+				Coding: []ConsentCoding{{System: p.System, Code: p.Code}},
+			})
 		}
 	}
 

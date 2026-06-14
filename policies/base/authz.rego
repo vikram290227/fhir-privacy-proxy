@@ -119,7 +119,9 @@ consent_permits := false if {
 }
 
 purpose_allowed if {
-    input.subject.purpose_of_use in input.resource.consent.allowed_purposes
+    some concept in input.resource.consent.allowed_purposes
+    some coding in concept.coding
+    coding.code == input.subject.purpose_of_use
 }
 
 consent_permits if {

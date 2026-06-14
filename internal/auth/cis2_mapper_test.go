@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -33,7 +34,10 @@ func TestExtractCIS2Roles_Nurse(t *testing.T) {
 	claims := makeCIS2Claims("787807429511", "role-001", []map[string]interface{}{
 		{"person_roleid": "role-001", "org_code": "RCB", "role_code": "S0080:G0450:R0100"},
 	}, nil)
-	roles := extractCIS2Roles(claims)
+	roles, err := extractCIS2Roles(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(roles) != 1 || roles[0] != "nurse" {
 		t.Errorf("expected [nurse], got %v", roles)
 	}
@@ -43,7 +47,10 @@ func TestExtractCIS2Roles_Doctor(t *testing.T) {
 	claims := makeCIS2Claims("123", "role-doc", []map[string]interface{}{
 		{"person_roleid": "role-doc", "org_code": "RJE", "role_code": "S0080:G0060:R8001"},
 	}, nil)
-	roles := extractCIS2Roles(claims)
+	roles, err := extractCIS2Roles(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(roles) != 1 || roles[0] != "doctor" {
 		t.Errorf("expected [doctor], got %v", roles)
 	}
@@ -53,18 +60,22 @@ func TestExtractCIS2Roles_Admin(t *testing.T) {
 	claims := makeCIS2Claims("456", "role-adm", []map[string]interface{}{
 		{"person_roleid": "role-adm", "org_code": "RCB", "role_code": "S0080:G0100:R0260"},
 	}, nil)
-	roles := extractCIS2Roles(claims)
+	roles, err := extractCIS2Roles(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(roles) != 1 || roles[0] != "admin" {
 		t.Errorf("expected [admin], got %v", roles)
 	}
 }
 
-func TestExtractCIS2Roles_UnknownRCode(t *testing.T) {
+func TestExtractCIS2Roles_UnknownRCode_ReturnsError(t *testing.T) {
 	claims := makeCIS2Claims("789", "", []map[string]interface{}{
 		{"person_roleid": "r1", "org_code": "RCB", "role_code": "S0001:G0001:R9999"},
 	}, nil)
-	if got := extractCIS2Roles(claims); len(got) != 0 {
-		t.Errorf("expected no roles for unknown R-code, got %v", got)
+	_, err := extractCIS2Roles(claims)
+	if !errors.Is(err, ErrMalformedIdentityClaims) {
+		t.Errorf("expected ErrMalformedIdentityClaims for unknown R-code, got %v", err)
 	}
 }
 
@@ -73,7 +84,10 @@ func TestExtractCIS2Roles_SelectedRoleOnly(t *testing.T) {
 		{"person_roleid": "role-nurse", "org_code": "RCB", "role_code": "S0080:G0450:R0100"},
 		{"person_roleid": "role-admin", "org_code": "RCB", "role_code": "S0080:G0100:R0260"},
 	}, nil)
-	roles := extractCIS2Roles(claims)
+	roles, err := extractCIS2Roles(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(roles) != 1 || roles[0] != "nurse" {
 		t.Errorf("expected only [nurse] from selected role, got %v", roles)
 	}
@@ -84,15 +98,33 @@ func TestExtractCIS2Roles_NoSelectedRoleUnionsAll(t *testing.T) {
 		{"person_roleid": "r1", "org_code": "RCB", "role_code": "S0080:G0450:R0100"},
 		{"person_roleid": "r2", "org_code": "RCB", "role_code": "S0080:G0060:R8001"},
 	}, nil)
-	if got := extractCIS2Roles(claims); len(got) != 2 {
+	got, err := extractCIS2Roles(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
 		t.Errorf("expected 2 roles from union, got %v", got)
 	}
 }
 
+// TestExtractCIS2Roles_Empty asserts that a token with no nhsid_nrbac_roles
+// claim is rejected with ErrMalformedIdentityClaims — the proxy must never
+// invent a default role when the claim is absent.
 func TestExtractCIS2Roles_Empty(t *testing.T) {
 	claims := jwt.MapClaims{"sub": "x"}
-	if got := extractCIS2Roles(claims); got != nil {
-		t.Errorf("expected nil when nhsid_nrbac_roles absent, got %v", got)
+	_, err := extractCIS2Roles(claims)
+	if !errors.Is(err, ErrMalformedIdentityClaims) {
+		t.Errorf("expected ErrMalformedIdentityClaims when nhsid_nrbac_roles absent, got %v", err)
+	}
+}
+
+// TestCIS2Mapper_MissingRoles_ReturnsError is the assessor-specified acceptance
+// test: a token with no role profile claim must error, not default to any role.
+func TestCIS2Mapper_MissingRoles_ReturnsError(t *testing.T) {
+	claims := jwt.MapClaims{"sub": "test-user"}
+	_, err := extractCIS2Roles(claims)
+	if !errors.Is(err, ErrMalformedIdentityClaims) {
+		t.Errorf("expected ErrMalformedIdentityClaims, got %v", err)
 	}
 }
 

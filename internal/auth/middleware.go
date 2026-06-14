@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -78,6 +79,11 @@ func (m *Middleware) ValidateToken(next http.Handler) http.Handler {
 
 		subjectCtx, err := m.buildSubjectContext(claims, tenantConfig, r)
 		if err != nil {
+			if errors.Is(err, ErrMalformedIdentityClaims) {
+				respondWithError(w, 401, "malformed_identity_claims",
+					"Identity assertion did not contain a valid role profile")
+				return
+			}
 			respondWithError(w, 400, "invalid_claims", err.Error())
 			return
 		}
@@ -178,7 +184,11 @@ func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Co
 	switch config.IdentityProvider {
 	case "cis2":
 		sub = extractCIS2SubjectID(claims)
-		roles = extractCIS2Roles(claims)
+		var roleErr error
+		roles, roleErr = extractCIS2Roles(claims)
+		if roleErr != nil {
+			return nil, roleErr
+		}
 		fhirContext = extractCIS2FHIRContext(claims)
 	default: // "keycloak" or unset
 		sub = extractSubjectID(claims)

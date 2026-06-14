@@ -57,6 +57,10 @@ func (m *Middleware) ScoreRisk(client *risk.Client) func(http.Handler) http.Hand
 			metrics.RiskScores.WithLabelValues(resp.Label).Inc()
 			if resp.Unavailable {
 				metrics.MLTimeouts.WithLabelValues(sub.TenantID).Inc()
+				metrics.RiskServiceUnavailable.WithLabelValues(sub.TenantID).Inc()
+				m.logger.Error("risk scoring service unavailable — operating fail-open",
+					zap.String("tenant", sub.TenantID),
+					zap.String("severity", "CRITICAL"))
 			}
 
 			sub.Risk = &RiskDecision{

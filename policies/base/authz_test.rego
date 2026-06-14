@@ -187,3 +187,53 @@ test_tier1_breakglass_bypasses if {
         "request": {"method": "GET", "path": "/fhir/r4/Patient/patient-1", "path_parts": ["Patient", "patient-1"]}
     }
 }
+
+
+# ─── FIX-2 consent CodeableConcept tests ──────────────────────────────────────
+
+test_purpose_allowed_nested_codeableconcept if {
+    purpose_allowed with input as {
+        "subject": {"purpose_of_use": "TREAT"},
+        "resource": {
+            "consent": {
+                "allowed_purposes": [
+                    {
+                        "coding": [
+                            {"system": "http://hl7.org/fhir/v3/ActReason", "code": "TREAT"},
+                            {"system": "http://hl7.org/fhir/v3/ActReason", "code": "ETREAT"}
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+}
+
+test_purpose_denied_no_matching_code if {
+    not purpose_allowed with input as {
+        "subject": {"purpose_of_use": "RESEARCH"},
+        "resource": {
+            "consent": {
+                "allowed_purposes": [
+                    {
+                        "coding": [
+                            {"system": "http://hl7.org/fhir/v3/ActReason", "code": "TREAT"}
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+}
+
+# Regression guard: flat string array must NOT silently match the nested rule.
+test_purpose_flat_array_shape_does_not_match if {
+    not purpose_allowed with input as {
+        "subject": {"purpose_of_use": "TREAT"},
+        "resource": {
+            "consent": {
+                "allowed_purposes": ["TREAT", "ETREAT"]
+            }
+        }
+    }
+}

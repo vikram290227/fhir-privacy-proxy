@@ -92,6 +92,12 @@ func TestLookup_ActiveConsent(t *testing.T) {
 	if len(info.AllowedPurposes) != 2 {
 		t.Errorf("allowed_purposes len = %d, want 2", len(info.AllowedPurposes))
 	}
+	if info.AllowedPurposes[0].Coding[0].Code != "TREATMENT" {
+		t.Errorf("allowed_purposes[0].coding[0].code = %q, want TREATMENT", info.AllowedPurposes[0].Coding[0].Code)
+	}
+	if info.AllowedPurposes[1].Coding[0].Code != "PAYMENT" {
+		t.Errorf("allowed_purposes[1].coding[0].code = %q, want PAYMENT", info.AllowedPurposes[1].Coding[0].Code)
+	}
 }
 
 func TestLookup_NoConsentOnFile(t *testing.T) {

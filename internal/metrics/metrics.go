@@ -146,6 +146,17 @@ var (
 		[]string{"tenant_id"},
 	)
 
+	// RiskServiceUnavailable counts requests where the ML risk service returned
+	// Unavailable=true (timeout, service down, decode error). Any non-zero rate
+	// over a 5-minute window means the threat-detection layer is blind — alert.
+	RiskServiceUnavailable = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_risk_service_unavailable_total",
+			Help: "Total requests where the ML risk service was unavailable (fail-open, Tier 1 only)",
+		},
+		[]string{"tenant_id"},
+	)
+
 	// AdminRequests counts requests to the /admin/v1 management API.
 	// Labelled by endpoint (the chi route pattern, NOT the raw path,
 	// so cardinality stays bounded) and HTTP status. Useful for
@@ -176,6 +187,7 @@ func init() {
 		RiskScoreDuration,
 		RateLimitHits,
 		MLTimeouts,
+		RiskServiceUnavailable,
 		AdminRequests,
 	)
 }

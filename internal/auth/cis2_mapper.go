@@ -18,10 +18,18 @@ package auth
 //	        security-and-authorisation/user-restricted-restful-apis-nhs-cis2
 //	SDS role codes: https://digital.nhs.uk/services/spine/rbac
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// ErrMalformedIdentityClaims is returned when the CIS2 token carries no
+// recognised SDS role assertion. Under DSPT a proxy must never invent
+// authorisation context — a missing or unrecognised role must hard-fail
+// with HTTP 401, not silently default to any role.
+var ErrMalformedIdentityClaims = errors.New("cis2: malformed or missing role assertion in identity claims")
 
 // cis2NRBACRole mirrors one element of the nhsid_nrbac_roles claim.
 // The role_code is a colon-delimited triple:
@@ -56,10 +64,10 @@ var rCodeToRole = map[string]string{
 // extractCIS2Roles derives proxy role strings from the active NRBAC role.
 // When selected_roleid is set only the matching role object contributes;
 // otherwise all roles are unioned (OPA enforces least-privilege).
-func extractCIS2Roles(claims jwt.MapClaims) []string {
+func extractCIS2Roles(claims jwt.MapClaims) ([]string, error) {
 	roles := parseCIS2NRBACRoles(claims)
 	if len(roles) == 0 {
-		return nil
+		return nil, fmt.Errorf("%w: nhsid_nrbac_roles absent or empty", ErrMalformedIdentityClaims)
 	}
 	selectedID := getStringClaim(claims, "selected_roleid")
 	seen := make(map[string]bool)
@@ -83,7 +91,10 @@ func extractCIS2Roles(claims jwt.MapClaims) []string {
 			addIfNew(r.RoleCode)
 		}
 	}
-	return out
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: no recognised SDS R-codes in role profile", ErrMalformedIdentityClaims)
+	}
+	return out, nil
 }
 
 // extractCIS2FHIRContext builds a FHIRContext from CIS2 ODS and NRBAC
