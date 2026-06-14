@@ -40,3 +40,30 @@ tenants:
     # tuning — this can be lifted by editing the file and reloading.
     requests_per_minute: 60
     requests_per_hour: 800
+
+  # ─── NHS CIS2 sandbox tenant ──────────────────────────────────────────
+  # Proves the existing JWKS/RS256 validation layer works against CIS2's
+  # OpenAM endpoints without code changes — only a config entry changes.
+  # Claims extraction uses cis2_mapper.go (nhsid_nrbac_roles → FHIRContext)
+  # instead of the default Keycloak mapper.
+  #
+  # To use: register at https://digital.nhs.uk/developer/getting-started,
+  # replace REPLACE_WITH_YOUR_CLIENT_ID with your sandbox client_id, then
+  # set FHIR_UPSTREAM to the NHS sandbox FHIR R4 base URL.
+  #
+  # Note: developer.nhs.uk was decommissioned 2026-03-02. Use the current
+  # NHS API Platform portal for all new registrations.
+  - issuer_url: "https://am.nhsint.auth-ptl.cis2.spineservices.nhs.uk:443/openam/oauth2/realms/root/realms/NHSIdentity/realms/Healthcare"
+    tenant_id: "nhs-cis2-sandbox"
+    jwks_endpoint: "https://am.nhsint.auth-ptl.cis2.spineservices.nhs.uk:443/openam/oauth2/realms/root/realms/NHSIdentity/realms/Healthcare/connect/jwk_uri"
+    audience: "REPLACE_WITH_YOUR_CLIENT_ID"
+    identity_provider: "cis2"
+    region: "national"
+    policy_bundle: "nhs-cis2-sandbox"
+    allowed_scopes:
+      - "patient/Patient.read"
+      - "patient/Observation.read"
+      - "patient/Condition.read"
+      - "patient/MedicationRequest.read"
+    requests_per_minute: 30
+    requests_per_hour: 300

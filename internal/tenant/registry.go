@@ -39,6 +39,25 @@ type Config struct {
 	// instance is wired into the proxy (REDIS_ADDR set and reachable).
 	RequestsPerMinute int `yaml:"requests_per_minute"`
 	RequestsPerHour   int `yaml:"requests_per_hour"`
+
+	// IdentityProvider selects the claims-extraction strategy used in
+	// buildSubjectContext. Supported values:
+	//   "keycloak" (default) — realm_access.roles + fhirContext claim
+	//   "cis2"               — NHS CIS2 nhsid_nrbac_roles + ODS org codes
+	// The JWT validation layer (JWKS fetch, RS256 sig check, audience
+	// validation) is provider-agnostic and requires no change per provider.
+	IdentityProvider string `yaml:"identity_provider"`
+
+	// Parent is the optional tenant_id of the ICS or national-level
+	// tenant whose policy bundle this tenant inherits from. Empty means
+	// no policy hierarchy (standalone Trust). Documents how Trust-level
+	// bundles compose with ICS-level or national-level base policies.
+	Parent string `yaml:"parent,omitempty"`
+
+	// Region is the NHS/administrative region (e.g. "london",
+	// "south-east"). Informational only — used for Privacy Officer
+	// dashboard grouping, not access-control decisions.
+	Region string `yaml:"region,omitempty"`
 }
 
 // DefaultRequestsPerMinute / DefaultRequestsPerHour are the fall-back

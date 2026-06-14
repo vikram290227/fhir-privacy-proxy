@@ -167,15 +167,28 @@ func (m *Middleware) getJWKS(config *tenant.Config) (*keyfunc.JWKS, error) {
 
 // buildSubjectContext assembles the in-process SubjectContext from a
 // set of verified claims and the inbound request. It is a thin
-// orchestrator — all claim translation lives in claims.go, which is the
-// single source of truth for JWT → domain mapping.
+// orchestrator — all claim translation lives in claims.go (Keycloak)
+// or cis2_mapper.go (NHS CIS2), selected by config.IdentityProvider.
 func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Config, r *http.Request) (*SubjectContext, error) {
-	sub := extractSubjectID(claims)
+	var (
+		sub         string
+		roles       []string
+		fhirContext FHIRContext
+	)
+	switch config.IdentityProvider {
+	case "cis2":
+		sub = extractCIS2SubjectID(claims)
+		roles = extractCIS2Roles(claims)
+		fhirContext = extractCIS2FHIRContext(claims)
+	default: // "keycloak" or unset
+		sub = extractSubjectID(claims)
+		roles = extractRoles(claims)
+		fhirContext = extractFHIRContext(claims)
+	}
+
 	if sub == "" {
 		return nil, fmt.Errorf("missing sub claim")
 	}
-
-	roles := extractRoles(claims)
 
 	purpose := strings.ToUpper(strings.TrimSpace(r.Header.Get("X-Purpose-Of-Use")))
 	if purpose == "" {
@@ -187,7 +200,7 @@ func (m *Middleware) buildSubjectContext(claims jwt.MapClaims, config *tenant.Co
 		SubjectType:  "practitioner",
 		Roles:        roles,
 		HasRoles:     len(roles) > 0,
-		FHIRContext:  extractFHIRContext(claims),
+		FHIRContext:  fhirContext,
 		Client:       extractClientInfo(claims),
 		Scopes:       extractScopes(claims),
 		Session:      extractSession(claims),

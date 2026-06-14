@@ -1,5 +1,13 @@
 # AI Risk Scoring Module
 
+> **Model maturity: pipeline validation only.**
+> The IsolationForest is trained exclusively on synthetic data generated
+> by `generate_synthetic_data.py`. AUC figures from `ml/tests/` reflect
+> how well the model fits its own generator — not real clinical access
+> patterns. Do **not** treat those numbers as deployment-readiness
+> signals. Before production use, seed the training set with at least
+> 90 days of real audit logs and validate against a held-out real split.
+
 This directory contains the Python ML layer that turns the FHIR
 Privacy Proxy into an adaptive, AI-aware access-control system.
 
@@ -93,6 +101,25 @@ export RISK_SERVICE_URL=http://localhost:8000
 | `>= 0.85` | `anomalous` | deny (unless break-glass) |
 
 Thresholds live in `policies/base/authz.rego` and can be tuned per tenant.
+
+## Risk score action tiers and `threshold_floor`
+
+The ML score drives OPA decisions through configurable thresholds
+(`risk_deny_threshold`, `risk_mask_threshold` in `authz.rego`).
+For v1 deployments the **recommended default is log-only** — the score
+is attached to the audit record and surfaced in the Privacy Officer
+dashboard, but does not block or widen masking until the model has been
+validated on real data.
+
+The `threshold_floor` concept: set `risk_deny_threshold = 1.1` (above
+the maximum possible score of 1.0) and `risk_mask_threshold = 1.1` to
+put the model into advisory mode. Scores still appear in Prometheus
+(`risk_score` histogram) and in the structured log so Privacy Officers
+can review flagged events without clinicians experiencing false-positive
+denials.
+
+When validation on real data reaches acceptable precision, lower the
+thresholds in `authz.rego` to activate blocking/masking.
 
 ## Feedback + nightly retraining
 
