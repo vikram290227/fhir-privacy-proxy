@@ -19,10 +19,11 @@ type OPAClient struct {
 }
 
 type Decision struct {
-	Allow  bool     `json:"allow"`
-	Reason string   `json:"reason"`
-	Remove []string `json:"remove,omitempty"`
-	Mask   []string `json:"mask,omitempty"`
+	Allow    bool     `json:"allow"`
+	Reason   string   `json:"reason"`
+	Remove   []string `json:"remove,omitempty"`
+	Mask     []string `json:"mask,omitempty"`
+	BulkWarn bool     `json:"bulk_warn,omitempty"`
 }
 
 type opaRequest struct {
@@ -69,12 +70,22 @@ func (c *OPAClient) Evaluate(ctx context.Context, subject interface{}, r *http.R
 		}
 	}
 
+	// Flatten query params to map[string]string (first value per key) so
+	// OPA can reference them as input.request.query["_count"] etc.
+	query := make(map[string]string, len(r.URL.Query()))
+	for k, vs := range r.URL.Query() {
+		if len(vs) > 0 {
+			query[k] = vs[0]
+		}
+	}
+
 	input := map[string]interface{}{
 		"subject": subject,
 		"request": map[string]interface{}{
 			"method":     r.Method,
 			"path":       r.URL.Path,
 			"path_parts": parts,
+			"query":      query,
 		},
 		"resource": resource,
 	}

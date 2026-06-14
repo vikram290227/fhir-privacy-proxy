@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -45,6 +46,9 @@ func TestScoreRisk_ClientError_FailOpen(t *testing.T) {
 		if sub.Risk.Score != 0 {
 			t.Errorf("expected score=0 on error, got %f", sub.Risk.Score)
 		}
+		if !sub.Risk.Unavailable {
+			t.Error("expected Unavailable=true when risk client errors")
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -67,14 +71,14 @@ func TestScoreRisk_Success(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"score":       0.2,
 			"label":       "normal",
-			"explanation": "routine access",
+			"explanation": map[string]float64{"hour": 0.1},
 		})
 	}))
 	defer srv.Close()
 
 	logger, _ := zap.NewDevelopment()
 	m := NewMiddleware(nil, logger)
-	client := risk.NewClient(srv.URL, logger)
+	client := risk.NewClientWithTimeout(srv.URL, 2*time.Second, logger)
 
 	called := false
 	handler := m.ScoreRisk(client)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

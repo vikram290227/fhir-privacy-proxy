@@ -1,4 +1,4 @@
-.PHONY: build run test test-cover test-public clean up down logs fmt lint
+.PHONY: build run test test-cover test-public bench bench-fixtures clean up down logs fmt lint
 
 # Stamp the build with a service.version attribute that shows up in
 # Jaeger / any OTLP collector. Falls back to a git-describe-ish string
@@ -60,3 +60,9 @@ fmt:
 
 lint:
 	go vet ./...
+
+bench:
+	go test -bench=BenchmarkRedaction -benchmem -benchtime=3s ./internal/fhir/...
+
+bench-fixtures:
+	./scripts/generate_bench_fixtures.sh

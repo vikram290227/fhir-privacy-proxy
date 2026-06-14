@@ -13,9 +13,36 @@ default reason    := "default-deny"
 risk_deny_threshold := 0.85
 risk_mask_threshold := 0.6
 
+# Tier 1 hard-deny thresholds — enforced without ML, from Redis counters.
+tier1_hour_limit      := 100  # requests/hour before unconditional deny
+tier1_afterhours_limit := 20  # requests/hour during off-hours before deny
+tier1_day_limit       := 500  # requests/day before unconditional deny
+
 risk_score := s if {
     s := input.subject.risk.score
+    not input.subject.risk.unavailable
 } else := 0
+
+# ─── Tier 1: counter-based hard-deny rules ────────────────
+# These fire regardless of ML score, using Redis sliding-window counters
+# surfaced via input.subject.access_counts. Break-glass bypasses Tier 1.
+
+tier1_deny if {
+    input.subject.access_counts.last_hour > tier1_hour_limit
+    not input.subject.break_glass.enabled
+}
+
+tier1_deny if {
+    input.subject.is_after_hours
+    input.subject.access_counts.last_hour > tier1_afterhours_limit
+    not "admin" in input.subject.roles
+    not input.subject.break_glass.enabled
+}
+
+tier1_deny if {
+    input.subject.access_counts.last_day > tier1_day_limit
+    not input.subject.break_glass.enabled
+}
 
 # ─── allow: normal clinical access ────────────────────────
 allow if {
@@ -25,6 +52,8 @@ allow if {
     valid_department_access
     not is_sensitive_patient
     consent_permits
+    not tier1_deny
+    not data.firewall.bulk_access.bulk_deny
     risk_score < risk_deny_threshold
 }
 
@@ -35,11 +64,13 @@ allow if {
     input.subject.has_roles
 }
 
-# allow: admin always has access (still blocked by very high risk)
+# allow: admin always has access (still blocked by very high risk and Tier 1)
 allow if {
     "admin" in input.subject.roles
     input.subject.has_roles
     consent_permits
+    not tier1_deny
+    not data.firewall.bulk_access.bulk_deny
     risk_score < risk_deny_threshold
 }
 
@@ -160,11 +191,23 @@ reason := "high_risk_denied" if {
     not input.subject.break_glass.enabled
 }
 
+reason := "tier1_denied" if {
+    tier1_deny
+    not input.subject.break_glass.enabled
+}
+
+reason := "bulk_denied" if {
+    data.firewall.bulk_access.bulk_deny
+    not input.subject.break_glass.enabled
+}
+
 # ─── final result object ──────────────────────────────────
 result := {
-    "allow":      allow,
-    "remove":     remove,
-    "mask":       mask,
-    "reason":     reason,
-    "risk_score": risk_score,
+    "allow":       allow,
+    "remove":      remove,
+    "mask":        mask,
+    "reason":      reason,
+    "risk_score":  risk_score,
+    "tier1_deny":  tier1_deny,
+    "bulk_warn":   data.firewall.bulk_access.bulk_warn,
 }

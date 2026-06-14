@@ -88,6 +88,17 @@ func (m *Middleware) RateLimit(next http.Handler) http.Handler {
 
 		writeRateLimitHeaders(w, decision)
 
+		// Surface counts to downstream middleware (ScoreRisk, OPA) so that
+		// Tier 1 hard rules and ML features can see how many requests this
+		// subject has made in each window, even when the rate limit wasn't hit.
+		if decision.Allowed {
+			sub.AccessCounts = AccessCounts{
+				LastMinute: int64(minLimit) - decision.RemainingMinute,
+				LastHour:   int64(hourLimit) - decision.RemainingHour,
+				LastDay:    decision.LastDay,
+			}
+		}
+
 		if !decision.Allowed {
 			metrics.RateLimitHits.WithLabelValues(sub.TenantID, sub.SubjectID, decision.Reason).Inc()
 			retry := int(decision.RetryAfter.Seconds())

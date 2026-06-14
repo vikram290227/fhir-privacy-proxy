@@ -28,32 +28,42 @@ func (m *Middleware) ScoreRisk(client *risk.Client) func(http.Handler) http.Hand
 			}
 
 			now := time.Now().UTC()
+			afterHours := now.Hour() < 6 || now.Hour() >= 22
+			sub.IsAfterHours = afterHours
+
 			req := risk.Request{
-				UserID:       sub.SubjectID,
-				Role:         sub.FHIRContext.Role,
-				Department:   sub.FHIRContext.Department,
-				PatientID:    extractPatientID(r.URL.Path),
-				ResourceType: extractFhirResourceType(r.URL.Path),
-				Action:       methodAction(r.Method),
-				Hour:         now.Hour(),
-				DayOfWeek:    int(now.Weekday()),
-				BreakGlass:   sub.BreakGlass != nil && sub.BreakGlass.Enabled,
+				UserID:             sub.SubjectID,
+				Role:               sub.FHIRContext.Role,
+				Department:         sub.FHIRContext.Department,
+				PatientID:          extractPatientID(r.URL.Path),
+				ResourceType:       extractFhirResourceType(r.URL.Path),
+				Action:             methodAction(r.Method),
+				Hour:               now.Hour(),
+				DayOfWeek:          int(now.Weekday()),
+				BreakGlass:         sub.BreakGlass != nil && sub.BreakGlass.Enabled,
+				AccessesLastMinute: sub.AccessCounts.LastMinute,
+				AccessesLastHour:   sub.AccessCounts.LastHour,
+				IsAfterHours:       afterHours,
 			}
 
 			start := time.Now()
 			resp, err := client.Score(r.Context(), req)
 			metrics.RiskScoreDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
-				m.logger.Warn("risk score failed, defaulting score=0", zap.Error(err))
-				resp = &risk.Response{Score: 0, Label: "normal"}
+				m.logger.Warn("risk score failed — Tier 1 rules only", zap.Error(err))
+				resp = &risk.Response{Score: 0, Label: "unavailable", Unavailable: true}
 			}
 
 			metrics.RiskScores.WithLabelValues(resp.Label).Inc()
+			if resp.Unavailable {
+				metrics.MLTimeouts.WithLabelValues(sub.TenantID).Inc()
+			}
 
 			sub.Risk = &RiskDecision{
 				Score:       resp.Score,
 				Label:       resp.Label,
 				Explanation: resp.Explanation,
+				Unavailable: resp.Unavailable,
 			}
 
 			next.ServeHTTP(w, r)

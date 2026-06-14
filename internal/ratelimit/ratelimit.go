@@ -49,6 +49,11 @@ type Decision struct {
 	// Reason identifies which window tripped ("minute" or "hour"). Empty
 	// when Allowed is true.
 	Reason string
+	// LastDay is the number of requests this (tenant, subject) pair has
+	// made in the past 24 hours. Always populated — even on deny — so the
+	// OPA Tier 1 policy can apply daily-volume thresholds without the
+	// Redis layer needing to enforce them directly (dayLimit is always 0).
+	LastDay int64
 }
 
 // Limiter is a Redis-backed sliding-window rate limiter.
@@ -62,44 +67,55 @@ type Limiter struct {
 	seq atomic.Uint64
 }
 
-// allowScript is the atomic check-and-add for both the minute and hour
+// allowScript is the atomic check-and-add for minute, hour, and day
 // windows. Arguments:
 //
 //	KEYS[1] = minute window key
 //	KEYS[2] = hour window key
+//	KEYS[3] = day window key
 //	ARGV[1] = now (nanoseconds)
 //	ARGV[2] = minute cutoff (nanoseconds)
 //	ARGV[3] = hour cutoff (nanoseconds)
-//	ARGV[4] = minute limit (0 disables)
-//	ARGV[5] = hour limit (0 disables)
-//	ARGV[6] = member (unique per call)
-//	ARGV[7] = minute TTL seconds
-//	ARGV[8] = hour TTL seconds
+//	ARGV[4] = day cutoff (nanoseconds)
+//	ARGV[5] = minute limit (0 disables enforcement)
+//	ARGV[6] = hour limit (0 disables enforcement)
+//	ARGV[7] = member (unique per call)
+//	ARGV[8] = minute TTL seconds
+//	ARGV[9] = hour TTL seconds
+//	ARGV[10] = day TTL seconds
+//
+// The day window is always recorded but never enforced here (day limit is
+// always passed as 0). OPA Tier 1 rules apply the daily threshold.
 //
 // Returns:
 //
-//	{ allowed, reason, min_count, hour_count, min_oldest, hour_oldest }
+//	{ allowed, reason, min_count, hour_count, day_count, min_oldest, hour_oldest }
 //
-// where allowed ∈ {0,1}, reason ∈ {"", "minute", "hour"}, and the
+// where allowed ∈ {0,1}, reason ∈ {"", "minute", "hour"}, and
 // *_oldest values are nanoseconds (0 when empty).
 var allowScript = redis.NewScript(`
 local min_key   = KEYS[1]
 local hour_key  = KEYS[2]
+local day_key   = KEYS[3]
 local now       = tonumber(ARGV[1])
 local min_cut   = tonumber(ARGV[2])
 local hour_cut  = tonumber(ARGV[3])
-local min_lim   = tonumber(ARGV[4])
-local hour_lim  = tonumber(ARGV[5])
-local member    = ARGV[6]
-local min_ttl   = tonumber(ARGV[7])
-local hour_ttl  = tonumber(ARGV[8])
+local day_cut   = tonumber(ARGV[4])
+local min_lim   = tonumber(ARGV[5])
+local hour_lim  = tonumber(ARGV[6])
+local member    = ARGV[7]
+local min_ttl   = tonumber(ARGV[8])
+local hour_ttl  = tonumber(ARGV[9])
+local day_ttl   = tonumber(ARGV[10])
 
--- Evict expired entries.
+-- Evict expired entries from all three windows.
 redis.call("ZREMRANGEBYSCORE", min_key,  "-inf", "(" .. min_cut)
 redis.call("ZREMRANGEBYSCORE", hour_key, "-inf", "(" .. hour_cut)
+redis.call("ZREMRANGEBYSCORE", day_key,  "-inf", "(" .. day_cut)
 
 local min_count  = redis.call("ZCARD", min_key)
 local hour_count = redis.call("ZCARD", hour_key)
+local day_count  = redis.call("ZCARD", day_key)
 
 local function oldest(key)
   local r = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
@@ -110,22 +126,25 @@ local min_oldest  = oldest(min_key)
 local hour_oldest = oldest(hour_key)
 
 if min_lim > 0 and min_count >= min_lim then
-  return {0, "minute", min_count, hour_count, min_oldest, hour_oldest}
+  return {0, "minute", min_count, hour_count, day_count, min_oldest, hour_oldest}
 end
 if hour_lim > 0 and hour_count >= hour_lim then
-  return {0, "hour", min_count, hour_count, min_oldest, hour_oldest}
+  return {0, "hour", min_count, hour_count, day_count, min_oldest, hour_oldest}
 end
 
 redis.call("ZADD", min_key,  now, member)
 redis.call("ZADD", hour_key, now, member)
+redis.call("ZADD", day_key,  now, member)
 redis.call("EXPIRE", min_key,  min_ttl)
 redis.call("EXPIRE", hour_key, hour_ttl)
+redis.call("EXPIRE", day_key,  day_ttl)
 
 -- Reflect the post-increment counts so the caller's headers are correct.
 min_count  = min_count  + 1
 hour_count = hour_count + 1
+day_count  = day_count  + 1
 
-return {1, "", min_count, hour_count, min_oldest, hour_oldest}
+return {1, "", min_count, hour_count, day_count, min_oldest, hour_oldest}
 `)
 
 // New constructs a Limiter talking to the Redis at addr. It does NOT
@@ -191,16 +210,22 @@ func (l *Limiter) Allow(ctx context.Context, tenantID, subjectID string, minLimi
 	// frozen (tests) or coarse (Windows).
 	member := fmt.Sprintf("%d-%d", nowNanos, l.seq.Add(1))
 
+	dayWindow := 24 * time.Hour
+	dayKey := keyFor(tenantID, subjectID, "day")
+	dayCut := now.Add(-dayWindow).UnixNano()
+
 	raw, err := allowScript.Run(ctx, l.redis,
-		[]string{minKey, hourKey},
+		[]string{minKey, hourKey, dayKey},
 		nowNanos,
 		minCut,
 		hourCut,
+		dayCut,
 		minLimit,
 		hourLimit,
 		member,
 		int((minWindow + 5*time.Second).Seconds()),
 		int((hourWindow + 5*time.Second).Seconds()),
+		int((dayWindow + 5*time.Second).Seconds()),
 	).Result()
 	if err != nil {
 		return Decision{}, fmt.Errorf("ratelimit: eval: %w", err)
@@ -220,6 +245,7 @@ func (l *Limiter) Allow(ctx context.Context, tenantID, subjectID string, minLimi
 		ResetMinute:     resetAt(result.minOldest, minWindow, now),
 		ResetHour:       resetAt(result.hourOldest, hourWindow, now),
 		Reason:          result.reason,
+		LastDay:         result.dayCount,
 	}
 	if !result.allowed {
 		switch result.reason {
@@ -239,6 +265,7 @@ type scriptResult struct {
 	reason     string
 	minCount   int64
 	hourCount  int64
+	dayCount   int64
 	minOldest  int64
 	hourOldest int64
 }
@@ -248,20 +275,22 @@ func parseScriptResult(raw any) (scriptResult, error) {
 	if !ok {
 		return scriptResult{}, fmt.Errorf("ratelimit: script returned %T, want []any", raw)
 	}
-	if len(arr) != 6 {
-		return scriptResult{}, fmt.Errorf("ratelimit: script returned %d elements, want 6", len(arr))
+	if len(arr) != 7 {
+		return scriptResult{}, fmt.Errorf("ratelimit: script returned %d elements, want 7", len(arr))
 	}
 	allowedI, _ := toInt64(arr[0])
 	reason, _ := arr[1].(string)
 	minCount, _ := toInt64(arr[2])
 	hourCount, _ := toInt64(arr[3])
-	minOldest, _ := toInt64(arr[4])
-	hourOldest, _ := toInt64(arr[5])
+	dayCount, _ := toInt64(arr[4])
+	minOldest, _ := toInt64(arr[5])
+	hourOldest, _ := toInt64(arr[6])
 	return scriptResult{
 		allowed:    allowedI == 1,
 		reason:     reason,
 		minCount:   minCount,
 		hourCount:  hourCount,
+		dayCount:   dayCount,
 		minOldest:  minOldest,
 		hourOldest: hourOldest,
 	}, nil

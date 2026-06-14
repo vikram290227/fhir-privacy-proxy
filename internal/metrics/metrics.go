@@ -135,6 +135,17 @@ var (
 		[]string{"tenant", "subject", "window"},
 	)
 
+	// MLTimeouts counts requests where the ML risk service exceeded its
+	// 15ms hard budget. High values indicate the ONNX-embedded path
+	// should be preferred over the FastAPI network-hop approach.
+	MLTimeouts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fhir_proxy_ml_timeouts_total",
+			Help: "Total risk-scoring calls that exceeded the 15ms deadline (Unavailable=true)",
+		},
+		[]string{"tenant_id"},
+	)
+
 	// AdminRequests counts requests to the /admin/v1 management API.
 	// Labelled by endpoint (the chi route pattern, NOT the raw path,
 	// so cardinality stays bounded) and HTTP status. Useful for
@@ -164,6 +175,7 @@ func init() {
 		RiskScores,
 		RiskScoreDuration,
 		RateLimitHits,
+		MLTimeouts,
 		AdminRequests,
 	)
 }
