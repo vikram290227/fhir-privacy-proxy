@@ -5,6 +5,7 @@
 *.dylib
 proxy
 !cmd/proxy/
+!internal/proxy/
 bin/
 
 # Test binary
