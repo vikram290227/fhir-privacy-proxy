@@ -1,0 +1,18 @@
+# NHS SDS R-code → proxy internal role mapping.
+# Reference: NHS RBAC Activity/Job code lists (NHS Digital, June 2024 edition).
+# https://digital.nhs.uk/services/spine/rbac
+#
+# To add new roles, append entries here and restart the proxy (or send SIGHUP
+# if hot-reload via fsnotify is enabled). No code change required.
+mappings:
+  R0100: nurse   # Registered Nurse
+  R0120: nurse   # Health Visitor
+  R0200: doctor  # Healthcare Professional
+  R0203: doctor  # Midwife
+  R8000: doctor  # Consultant Physician
+  R8001: doctor  # Medical Officer
+  R8003: doctor  # Specialist Registrar
+  R0260: admin   # Administrative Officer
+  R0300: admin   # Clinical Administrator
+  R0400: admin   # Executive / Governance
+  R9200: admin   # System Administrator

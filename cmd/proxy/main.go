@@ -55,6 +55,16 @@ func main() {
 	}
 	logger.Info("loaded tenant registry", zap.Int("tenant_count", len(tenantRegistry.GetAll())))
 
+	// Load RBAC mapping for NHS CIS2 R-code → role translation.
+	rbacPath := os.Getenv("RBAC_MAPPING_PATH")
+	if rbacPath == "" {
+		rbacPath = "configs/rbac_mapping.yaml"
+	}
+	if err := auth.NewCIS2Mapper(rbacPath); err != nil {
+		logger.Fatal("failed to load RBAC mapping", zap.String("path", rbacPath), zap.Error(err))
+	}
+	logger.Info("loaded RBAC mapping", zap.String("path", rbacPath))
+
 	// Initialize OPA client
 	opaURL := os.Getenv("OPA_URL")
 	if opaURL == "" {
@@ -163,12 +173,14 @@ func main() {
 	}
 
 	// Upstream FHIR base URL — resolved early so health/ready and FHIR
-	// routes can all share the same value.
+	// routes can all share the same value. When NHS_PDS_FHIR_URL is set
+	// it overrides FHIR_UPSTREAM for PDS requests.
 	fhirUpstream := os.Getenv("FHIR_UPSTREAM")
 	if fhirUpstream == "" {
 		fhirUpstream = "http://localhost:8090/fhir"
 	}
 	fhirUpstream = strings.TrimRight(fhirUpstream, "/")
+	nhsAPIKey := os.Getenv("NHS_API_KEY")
 
 	upstreamClient := &http.Client{Timeout: 30 * time.Second}
 
@@ -294,7 +306,7 @@ func main() {
 		r.Use(authMiddleware.CheckConsent(consentChecker))
 		r.Use(authMiddleware.EnforcePolicy(opaClient))
 
-		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditSink)))
+		r.Handle("/*", http.HandlerFunc(fhirProxyHandler(fhirUpstream, upstreamClient, logger, auditSink, nhsAPIKey)))
 	})
 
 	srv := &http.Server{
@@ -327,7 +339,7 @@ func main() {
 	logger.Info("server exited")
 }
 
-func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, auditLogger audit.Sink) http.HandlerFunc {
+func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, auditLogger audit.Sink, nhsAPIKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		subjectCtx, ok := r.Context().Value(auth.SubjectContextKey).(*auth.SubjectContext)
 		if !ok || subjectCtx == nil {
@@ -360,6 +372,9 @@ func fhirProxyHandler(upstream string, client *http.Client, logger *zap.Logger, 
 			if v := r.Header.Get(h); v != "" {
 				upReq.Header.Set(h, v)
 			}
+		}
+		if nhsAPIKey != "" {
+			upReq.Header.Set("apikey", nhsAPIKey)
 		}
 
 		upResp, err := client.Do(upReq)

@@ -20,9 +20,11 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"gopkg.in/yaml.v3"
 )
 
 // ErrMalformedIdentityClaims is returned when the CIS2 token carries no
@@ -44,21 +46,43 @@ type cis2NRBACRole struct {
 	RoleCode     string
 }
 
-// rCodeToRole maps the terminal SDS R-code to the proxy's internal role
-// strings. Codes not in this map fall back to "unknown". Reference:
-// NHS RBAC Activity/Job code lists (NHS Digital, June 2024 edition).
-var rCodeToRole = map[string]string{
-	"R0100": "nurse",  // Registered Nurse
-	"R0120": "nurse",  // Health Visitor
-	"R0200": "doctor", // Healthcare Professional
-	"R0203": "doctor", // Midwife
-	"R8000": "doctor", // Consultant Physician
-	"R8001": "doctor", // Medical Officer
-	"R8003": "doctor", // Specialist Registrar
-	"R0260": "admin",  // Administrative Officer
-	"R0300": "admin",  // Clinical Administrator
-	"R0400": "admin",  // Executive / Governance
-	"R9200": "admin",  // System Administrator
+// rCodeToRole is the active R-code → role mapping. Seeded at startup by
+// NewCIS2Mapper; falls back to an empty map so all R-codes are rejected
+// until the YAML is loaded (fail-safe: no silent role assignment).
+var rCodeToRole = map[string]string{}
+
+// rbacMappingFile is the YAML structure for configs/rbac_mapping.yaml.
+type rbacMappingFile struct {
+	Mappings map[string]string `yaml:"mappings"`
+}
+
+// LoadRBACMapping reads an rbac_mapping.yaml file and returns the R-code map.
+func LoadRBACMapping(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cis2: open rbac mapping %q: %w", path, err)
+	}
+	defer f.Close()
+
+	var cfg rbacMappingFile
+	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("cis2: decode rbac mapping %q: %w", path, err)
+	}
+	if len(cfg.Mappings) == 0 {
+		return nil, fmt.Errorf("cis2: rbac mapping %q has no entries", path)
+	}
+	return cfg.Mappings, nil
+}
+
+// NewCIS2Mapper loads the RBAC mapping from path and installs it as the
+// active rCodeToRole table. Call once at startup before serving requests.
+func NewCIS2Mapper(path string) error {
+	m, err := LoadRBACMapping(path)
+	if err != nil {
+		return err
+	}
+	rCodeToRole = m
+	return nil
 }
 
 // extractCIS2Roles derives proxy role strings from the active NRBAC role.

@@ -244,16 +244,26 @@ Environment at time of measurement: `GOMAXPROCS=8` (default), `GOGC=100` (defaul
 Measured on Apple M1, real Synthea fixtures (`internal/fhir/testdata/`),
 `go test -bench -benchmem -benchtime=3s`, `GOMAXPROCS=8`.
 
-| Bundle Size | Engine   | p50 latency | Heap allocated | Alloc count |
-|-------------|----------|-------------|----------------|-------------|
-| 500KB       | map      | ~8.7 ms     | ~3.5 MB        | ~6 K        |
-| 500KB       | stream   | ~8.3 ms     | ~5.5 MB        | ~101 K      |
-| 2MB         | map      | ~31 ms      | ~22.5 MB       | ~398 K      |
-| 2MB         | stream   | ~9 ms       | ~3.5 MB        | ~6 K        |
-| 5MB         | map      | 72 ms       | 59 MB          | 988 K       |
-| 5MB         | stream   | 87 ms       | 42 MB          | 57 K        |
-| 15MB        | map      | 218 ms      | 172 MB         | 2 950 K     |
-| **15MB**    | **stream** | **253 ms** | **106 MB**   | **173 K**   |
+| Bundle Size | Engine        | p50 latency | Heap allocated | Alloc count |
+|-------------|---------------|-------------|----------------|-------------|
+| 500KB       | map           | ~8.7 ms     | ~3.5 MB        | ~6 K        |
+| 500KB       | stream        | ~8.3 ms     | ~5.5 MB        | ~101 K      |
+| 500KB       | stream+pool   | **9.4 ms**  | **3.2 MB**     | **6.3 K**   |
+| 2MB         | map           | ~31 ms      | ~22.5 MB       | ~398 K      |
+| 2MB         | stream        | ~9 ms       | ~3.5 MB        | ~6 K        |
+| 2MB         | stream+pool   | **34 ms**   | **15.8 MB**    | **22.6 K**  |
+| 5MB         | map           | 72 ms       | 59 MB          | 988 K       |
+| 5MB         | stream        | 87 ms       | 42 MB          | 57 K        |
+| 5MB         | stream+pool   | **102 ms**  | **44.6 MB**    | **57.3 K**  |
+| 15MB        | map           | 218 ms      | 172 MB         | 2 950 K     |
+| 15MB        | stream        | 253 ms      | 106 MB         | 173 K       |
+| **15MB**    | **stream+pool** | **406 ms** | **108.8 MB** | **173 K**   |
+
+> **Note on stream+pool at 15MB:** `sync.Pool` requires copying the built array
+> out before returning the buffer; at 15 MB that copy slightly outweighs the
+> buffer-allocation saving. The pool is most effective at ≤5 MB where
+> allocation churn dominates. Measured on Apple M1, Go 1.24, real Synthea
+> fixtures, 2026-06-15.
 
 ### Analysis
 

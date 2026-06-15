@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/buger/jsonparser"
 )
+
+var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
 
 // RedactStream performs field removal and masking on a JSON byte slice without
 // full deserialization into map[string]any. It uses buger/jsonparser for
@@ -242,7 +247,8 @@ func reencodeJSONValue(value []byte, dt jsonparser.ValueType) []byte {
 }
 
 func buildJSONArray(elements [][]byte) []byte {
-	var buf bytes.Buffer
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
 	buf.WriteByte('[')
 	for i, elem := range elements {
 		if i > 0 {
@@ -251,5 +257,8 @@ func buildJSONArray(elements [][]byte) []byte {
 		buf.Write(elem)
 	}
 	buf.WriteByte(']')
-	return buf.Bytes()
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	bufPool.Put(buf)
+	return result
 }

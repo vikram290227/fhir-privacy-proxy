@@ -4,6 +4,7 @@
 *.so
 *.dylib
 proxy
+!cmd/proxy/
 bin/
 
 # Test binary

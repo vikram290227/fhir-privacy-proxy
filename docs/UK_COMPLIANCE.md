@@ -76,6 +76,34 @@ DTAC covers five domains. This assessment is a gap analysis, not a submission.
 | INTEROPen / HL7 UK membership | Not applicable to a proxy layer |
 | SNOMED CT / dm+d binding | Upstream server responsibility |
 
+### NHS PDS Sandbox Registration
+
+To wire this proxy against the NHS Personal Demographics Service (PDS) FHIR R4 sandbox:
+
+1. **Create an NHS Digital developer account** at <https://digital.nhs.uk/developer>.
+2. **Register a new application** in the NHS API Management portal and select the
+   *Personal Demographics Service — FHIR API* product.
+3. **Generate an API key** (displayed once — copy it immediately).
+4. **Set environment variables** (copy `.env.example` and populate):
+   ```
+   NHS_PDS_FHIR_URL=https://sandbox.api.service.nhs.uk/personal-demographics/FHIR/R4
+   NHS_API_KEY=<your-api-key>
+   FHIR_UPSTREAM=${NHS_PDS_FHIR_URL}
+   ```
+5. **Start the proxy** — the `apikey` header is injected on every upstream
+   request when `NHS_API_KEY` is set (`cmd/proxy/main.go`, `fhirProxyHandler`).
+6. **Smoke test:**
+   ```bash
+   curl -H "Authorization: Bearer <jwt>" \
+        http://localhost:8080/fhir/r4/Patient/9000000009
+   ```
+   The sandbox NHS number `9000000009` is seeded by NHS Digital and should
+   return a synthetic patient record.
+
+> **Production notes:** PDS production requires PKCE OAuth2 / CIS2 token exchange
+> (not an API key). The `NHS_API_KEY` path is sandbox-only. For production, issue
+> tokens via the CIS2 `cis2` tenant configuration and leave `NHS_API_KEY` unset.
+
 ### Domain 5 — Usability and Accessibility
 
 | Criterion | Status |
